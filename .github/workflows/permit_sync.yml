@@ -1,6 +1,9 @@
 name: Miami-Dade Permits Ingestion Pipeline
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     # Run daily at 06:00 UTC
     - cron: '0 6 * * *'
