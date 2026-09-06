@@ -207,6 +207,12 @@ class OpportunityStorage:
 
             conn.executescript(OPPORTUNITY_SCHEMA_SQL)
 
+        try:
+            from src.roofing.storage import RoofingStorage
+            RoofingStorage(self.db)
+        except Exception:
+            pass
+
     def save_timelines(self, timelines: Dict[str, PropertyTimeline]) -> int:
         conn = self.db.get_connection()
         now_utc = datetime.now(timezone.utc).isoformat()

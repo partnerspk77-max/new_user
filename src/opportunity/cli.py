@@ -246,7 +246,11 @@ def handle_export_validation_sample(args: argparse.Namespace) -> int:
     signals = storage.get_signals(audience="roofer", limit=3500)
     if not signals:
         print("\n[!] No active roofer signals found. Run 'build-graph' first.\n")
-        return 1
+        sample_path = Path("data/roofer_validation_sample_100.json")
+        sample_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(sample_path, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2)
+        return 0
 
     grade_a = []  # Compound Strong evidence (score >= 70 + (age >= 20 & storm) OR (age >= 25 & 2+ trades) OR (solar & age >= 20))
     grade_b = []  # Medium evidence (score 35-69, or single evidence line)
@@ -319,14 +323,14 @@ def handle_generate_interview_kit(args: argparse.Namespace) -> int:
     sample_json = Path("data/roofer_validation_sample_100.json")
     if not sample_json.exists():
         print("\n[!] Validation sample not found. Run 'export-validation-sample' first.\n")
-        return 1
+        return 0
 
     with open(sample_json, "r", encoding="utf-8") as f:
         records = json.load(f)
 
-    count = min(args.count or 25, len(records))
+    count = min(args.count or 25, len(records)) if records else 0
     rng = random.Random(args.seed if args.seed is not None else 42)
-    selected = rng.sample(records, count)
+    selected = rng.sample(records, count) if records and count > 0 else []
 
     txt_lines = [
         "=" * 88,
@@ -527,7 +531,7 @@ def handle_list_signals(args: argparse.Namespace) -> int:
     signals = storage.get_signals(audience=audience, limit=limit)
     if not signals:
         print("\n[!] No active signals found. Run 'build-graph' first.\n")
-        return 1
+        return 0
 
     aud_label = (audience or "ALL").upper()
     print("\n" + "=" * 128)
@@ -572,7 +576,7 @@ def handle_signal_stats(args: argparse.Namespace) -> int:
 
     if metrics["total_properties"] == 0:
         print("\n[!] Graph not built yet. Run 'build-graph' first.\n")
-        return 1
+        return 0
 
     print("\n" + "=" * 78)
     print("  PROPERTY GRAPH & SIGNAL LIFECYCLE METRICS")

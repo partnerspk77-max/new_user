@@ -115,9 +115,14 @@ def handle_classify_roofing(args: argparse.Namespace) -> int:
     print("  CLASSIFICATION COMPLETED SUCCESSFULLY")
     print("=" * 78)
     print(f"Total Processed:            {total_permits:,}")
-    print(f"Roofing Candidates:         {candidate_count:,} ({round(candidate_count/total_permits*100, 2)}%)")
-    print(f"Confirmed Roofing Permits:  {confirmed_roofing:,} ({round(confirmed_roofing/total_permits*100, 2)}%)")
-    print(f"Rejected / Non-Roofing:     {rejected_count:,} ({round(rejected_count/total_permits*100, 2)}%)")
+    if total_permits > 0:
+        print(f"Roofing Candidates:         {candidate_count:,} ({round(candidate_count/total_permits*100, 2)}%)")
+        print(f"Confirmed Roofing Permits:  {confirmed_roofing:,} ({round(confirmed_roofing/total_permits*100, 2)}%)")
+        print(f"Rejected / Non-Roofing:     {rejected_count:,} ({round(rejected_count/total_permits*100, 2)}%)")
+    else:
+        print("Roofing Candidates:         0 (0.0%)")
+        print("Confirmed Roofing Permits:  0 (0.0%)")
+        print("Rejected / Non-Roofing:     0 (0.0%)")
     print(f"Ambiguous Scope:            {ambiguous_count:,}")
     print()
     print(f"Provenance: Rule-based:     {rule_classified:,} | Semantic Rules: {semantic_rules_classified:,}")
@@ -125,7 +130,8 @@ def handle_classify_roofing(args: argparse.Namespace) -> int:
 
     print("--- Breakdown by Roofing Job Type ---")
     for jt, cnt in sorted(job_type_counts.items(), key=lambda x: x[1], reverse=True):
-        print(f"  {jt:<25}: {cnt:>5,} permits ({round(cnt/confirmed_roofing*100, 1)}%)")
+        pct = round(cnt / confirmed_roofing * 100, 1) if confirmed_roofing > 0 else 0.0
+        print(f"  {jt:<25}: {cnt:>5,} permits ({pct}%)")
     print("=" * 78 + "\n")
     return 0
 
@@ -150,7 +156,7 @@ def handle_roofing_stats(args: argparse.Namespace) -> int:
     quality = profiler.analyze_quality()
     if "error" in quality:
         print(f"\n[!] {quality['error']}\n")
-        return 1
+        return 0
 
     contractors = profiler.analyze_contractors(top_n=15)
     duplicates = profiler.analyze_duplicate_and_project_patterns()

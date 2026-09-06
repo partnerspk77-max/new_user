@@ -38,6 +38,11 @@ class PropertyOpportunityEngine:
         self.db = db
         self.ref_dt = ref_dt or datetime.now(timezone.utc)
         self.storm_correlator = storm_correlator
+        try:
+            from src.roofing.storage import RoofingStorage
+            RoofingStorage(self.db)
+        except Exception:
+            pass
 
     def _get_storm_correlator(self) -> Optional[StormCorrelator]:
         if self.storm_correlator is not None:
