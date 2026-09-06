@@ -112,7 +112,40 @@ python -m src.cli export-json --output data/permits.json
 
 ---
 
-## 5. Automated GitHub Actions Workflow & Public Repository Setup
+## 5. Roofing Permit Intelligence & Classification
+
+The roofing intelligence module (`src/roofing/`) runs independently on top of normalized permits without polluting the raw ingestion layer:
+
+### Discovered Miami-Dade Roofing Codes
+- **`CAT 0092`**: `GRAVEL, SBS, SINGLE PLY, ETC.` (Commercial flat roofing, modified bitumen, TPO/EPDM)
+- **`CAT 0095`**: `ASPHALT (FIBERGLASS) SHINGLE ROOFS` (Residential shingle replacements)
+- **`CAT 0096`**: `METAL, WOOD SHINGLES & SHAKES` (Standing seam metal, architectural wood shakes)
+- **`CAT 0107`**: `TILE ROOF` (Concrete & clay tile roofing)
+- **`CAT 0109`**: `WATERPROOFING` (Roof deck coatings)
+- **`CAT 0050`**: `RAISE EXISTING ROOF MOUNTED EQUIP` (Mechanical curb raising for reroofing)
+
+### Roofing CLI Commands
+```bash
+# 1. Profile discovered categories and term distributions
+python -m src.roofing.cli inspect-roofing
+
+# 2. Run deterministic candidate detection and semantic classification
+python -m src.roofing.cli classify-roofing
+
+# 3. Generate 50/50/50 stratified human validation set
+python -m src.roofing.cli validate-roofing
+
+# 4. Generate comprehensive quality, contractor concentration, and duplicate reports
+python -m src.roofing.cli roofing-stats
+```
+
+### Outputs & Datasets
+- **`data/roofing_permits.csv` & `.json`**: 2,719 confirmed roofing permits with job types, confidence, and provenance.
+- **`data/roofing_validation_sample.csv` & `.json`**: 50 predicted roofing, 50 non-roofing, and 50 ambiguous permits for audit.
+
+---
+
+## 6. Automated GitHub Actions Workflow & Public Repository Setup
 
 A production, fully flexible GitHub Actions workflow is provided in [`.github/workflows/permit_sync.yml`](.github/workflows/permit_sync.yml).
 

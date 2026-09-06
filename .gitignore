@@ -40,6 +40,7 @@ data/*.db-wal
 data/*.db-shm
 data/*.json
 data/*.jsonl
+data/*.csv
 logs/*.log
 !logs/.gitkeep
 !data/.gitkeep
