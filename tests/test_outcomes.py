@@ -82,16 +82,56 @@ class TestOutcomeStorage:
         storage = OutcomeStorage(test_db)
 
         outcomes = [
-            SignalOutcome(signal_id="S1", folio="F1", reviewer_or_contractor="R1", customer_contacted=True, won=True),
-            SignalOutcome(signal_id="S2", folio="F2", reviewer_or_contractor="R1", customer_contacted=True, lost=True),
-            SignalOutcome(signal_id="S3", folio="F3", reviewer_or_contractor="R2", customer_marked_bad=True),
+            SignalOutcome(
+                signal_id="S1",
+                folio="F1",
+                reviewer_or_contractor="R1",
+                customer_viewed=True,
+                contractor_selected=True,
+                customer_contacted=True,
+                appointment=True,
+                estimate_amount=25000.0,
+                won=True,
+                won_amount=23500.0,
+                reason_code="confirmed_old_roof",
+            ),
+            SignalOutcome(
+                signal_id="S2",
+                folio="F2",
+                reviewer_or_contractor="R1",
+                customer_viewed=True,
+                contractor_selected=True,
+                customer_contacted=True,
+                appointment=True,
+                estimate_amount=15000.0,
+                lost=True,
+                reason_code="roof_already_replaced",
+            ),
+            SignalOutcome(
+                signal_id="S3",
+                folio="F3",
+                reviewer_or_contractor="R2",
+                customer_viewed=True,
+                contractor_selected=False,
+                customer_marked_bad=True,
+                reason_code="wrong_property",
+            ),
         ]
         for o in outcomes:
             storage.record_outcome(o)
 
         metrics = storage.get_conversion_metrics()
         assert metrics["total_tracked"] == 3
+        assert metrics["viewed"] == 3
+        assert metrics["selected"] == 2
+        assert metrics["selection_rate_pct"] == 66.7
         assert metrics["contacted"] == 2
+        assert metrics["appointments"] == 2
         assert metrics["deals_won"] == 1
         assert metrics["deals_lost"] == 1
         assert metrics["win_rate_pct"] == 50.0
+        assert metrics["total_estimate_dollars"] == 40000.0
+        assert metrics["total_won_dollars"] == 23500.0
+        assert "confirmed_old_roof" in metrics["by_reason"]
+        assert "roof_already_replaced" in metrics["by_reason"]
+        assert "wrong_property" in metrics["by_reason"]

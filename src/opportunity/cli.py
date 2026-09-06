@@ -27,7 +27,13 @@ from src.config import config
 from src.enrichment.storage import ParcelStorage
 from src.opportunity.engine import PropertyOpportunityEngine
 from src.opportunity.models import SignalStatus
-from src.opportunity.outcomes import OutcomeStorage, SignalOutcome
+from src.opportunity.outcomes import (
+    ALL_REASON_CODES,
+    NEGATIVE_REASONS,
+    POSITIVE_REASONS,
+    OutcomeStorage,
+    SignalOutcome,
+)
 from src.opportunity.storage import OpportunityStorage
 from src.storage.database import Database
 from src.weather.client import NOAAStormClient
@@ -188,8 +194,8 @@ def handle_build_graph(args: argparse.Namespace) -> int:
 
     export_stats = storage.export_signals(csv_roofers, csv_suppliers, json_all)
 
-    # Legacy files
-    storage.export_signals(Path("data/opportunities_roofers.csv"), Path("data/opportunities_suppliers.csv"), Path("data/commercial_opportunities.json"))
+    # Export 3 commercial value streams
+    feed_stats = storage.export_commercial_feeds(Path("data"))
 
     metrics = storage.get_stats()
     duration = round(time.perf_counter() - start_time, 2)
@@ -205,7 +211,7 @@ def handle_build_graph(args: argparse.Namespace) -> int:
     print("--- [1] Value Streams Breakdown ---")
     for aud, count in sorted(metrics["by_audience"].items(), key=lambda x: x[1], reverse=True):
         pct = round((count / metrics["active_signals"]) * 100, 1) if metrics["active_signals"] else 0
-        name = "Track B: Modernization Signals (Pre-Permit Roofer Hypotheses)" if "ROOF" in aud else "Track A: Permitted Projects (Material Supply & Logistics)"
+        name = "Feed 2: Pre-Permit Roof Opportunities (Roofers)" if "ROOF" in aud else "Feed 1: Permitted Projects (Suppliers/Logistics)"
         print(f"  {name:<65}: {count:>5,} ({pct:>5.1f}%)")
     print()
 
@@ -221,10 +227,11 @@ def handle_build_graph(args: argparse.Namespace) -> int:
         print(f"  {f_tier:<25}: {count:>5,} ({pct:>5.1f}%)")
     print("=" * 78)
 
-    print(f"\n[✓] Exported signal feeds:")
-    print(f"    - Roofer Signals:   {csv_roofers} ({export_stats['roofers']:,} records)")
-    print(f"    - Supplier Feeds:   {csv_suppliers} ({export_stats['suppliers']:,} records)")
-    print(f"    - Unified Pipeline: {json_all} ({export_stats['total']:,} records)\n")
+    print(f"\n[✓] Exported 3 Commercial Feeds:")
+    print(f"    - Feed 1 (Permitted Projects):   {feed_stats['files']['feed_1_csv']} ({feed_stats['feed_1_permitted_projects']:,} records)")
+    print(f"    - Feed 2 (Pre-Permit Roofer):    {feed_stats['files']['feed_2_csv']} ({feed_stats['feed_2_pre_permit_opportunities']:,} records)")
+    print(f"    - Feed 3 (Market Intelligence):  {feed_stats['files']['feed_3_csv']} ({feed_stats['feed_3_market_intelligence_contractors']:,} contractors)")
+    print(f"    - Unified Signal Database:       {json_all} ({export_stats['total']:,} records)\n")
     return 0
 
 
@@ -240,26 +247,36 @@ def handle_export_validation_sample(args: argparse.Namespace) -> int:
         print("\n[!] No active roofer signals found. Run 'build-graph' first.\n")
         return 1
 
-    grade_a = []  # Strong evidence (score >= 70 + verified age >= 20y or storm)
-    grade_b = []  # Medium evidence (score 40-69 or moderate age)
-    grade_c = []  # Speculative / exploratory (score < 40 or unrecorded age)
+    grade_a = []  # Compound Strong evidence (score >= 70 + (age >= 20 & storm) OR (age >= 25 & 2+ trades) OR (solar & age >= 20))
+    grade_b = []  # Medium evidence (score 35-69, or single evidence line)
+    grade_c = []  # Exploratory / young / unrecorded age (score < 35, unrecorded age, or age <= 5)
 
     for s in signals:
         b_age = s.get("building_age")
         score = s.get("evidence_score", 0.0)
         has_storm = bool(s.get("storm_distance_miles") and s.get("storm_distance_miles") <= 5.0)
+        s_type = s.get("signal_type")
+        corrob = s.get("corroborating_signals", [])
 
-        if score >= 70.0 and ((b_age and b_age >= 20) or has_storm):
+        # Strict Compound Evidence for Grade A:
+        # Requires at least TWO distinct, corroborating physical/event dimensions
+        is_compound_a = score >= 70.0 and (
+            (b_age and b_age >= 20 and has_storm)
+            or (b_age and b_age >= 25 and len(corrob) >= 2)
+            or (s_type == "SOLAR_ROOF_SIGNAL" and b_age and b_age >= 20)
+        )
+
+        if is_compound_a:
             if len(grade_a) < 40:
                 s["validation_tier"] = "GRADE_A_STRONG_EVIDENCE"
                 s["evidence_grade"] = "A"
                 grade_a.append(s)
-        elif 35.0 <= score < 70.0:
+        elif (35.0 <= score < 70.0) or (score >= 70.0 and not is_compound_a):
             if len(grade_b) < 40:
                 s["validation_tier"] = "GRADE_B_MEDIUM_EVIDENCE"
                 s["evidence_grade"] = "B"
                 grade_b.append(s)
-        elif score < 35.0 or s.get("year_built_status") == "UNRECORDED":
+        elif score < 35.0 or s.get("year_built_status") == "UNRECORDED" or (b_age is not None and b_age <= 5):
             if len(grade_c) < 20:
                 s["validation_tier"] = "GRADE_C_EXPLORATORY_SIGNAL"
                 s["evidence_grade"] = "C"
@@ -281,18 +298,19 @@ def handle_export_validation_sample(args: argparse.Namespace) -> int:
             writer.writerows(all_sample)
 
     print(f"Sample Stratification:")
-    print(f"  • Grade A (Strong Evidence - Aging Structure / Severe Storm) : {len(grade_a):>2} records")
-    print(f"  • Grade B (Medium Evidence - Moderate Age / Solar / Scope)  : {len(grade_b):>2} records")
-    print(f"  • Grade C (Exploratory Hypotheses - Modernization Velocity)  : {len(grade_c):>2} records")
-    print(f"  Total Sample Size:                                          {len(all_sample):>2} records")
+    print(f"  • Grade A (Compound Strong Evidence: Age >= 20y + Storm / Multi-trade) : {len(grade_a):>2} records")
+    print(f"  • Grade B (Medium Evidence: Moderate Age / Single Signal / Solar)       : {len(grade_b):>2} records")
+    print(f"  • Grade C (Exploratory Hypotheses: Unrecorded / Young Age / Low Score)  : {len(grade_c):>2} records")
+    print(f"  Total Sample Size:                                                     {len(all_sample):>2} records")
     print("-" * 88)
     print(f"[✓] Exported Contractor Interview Packets:")
     print(f"    - CSV Format:  {csv_path}")
     print(f"    - JSON Format: {json_path}")
-    print("\n[★] STRATEGIC INTERVIEW PROTOCOL:")
+    print("\n[★] COMMERCIAL DISCOVERY PROTOCOL:")
     print("    Take these 100 properties to 10–20 Miami-Dade roofing contractors and ask:")
-    print("    \"Which 5 would you actually send a salesperson or estimator to?\"")
-    print("    Record their choices using: python -m src.opportunity.cli record-outcome\n")
+    print("    \"Pick the 10 properties you'd actually spend money/time pursuing.\"")
+    print("    Record their choices using:")
+    print("    python -m src.opportunity.cli record-outcome --signal-id <ID> --contractor <NAME> --selected [options]\n")
     return 0
 
 
@@ -302,26 +320,38 @@ def handle_record_outcome(args: argparse.Namespace) -> int:
     contractor = args.contractor
     notes = args.notes or ""
 
+    reason = args.reason.strip().lower() if args.reason else None
+    if reason and reason not in ALL_REASON_CODES:
+        print(f"\n[!] Notice: Custom reason code '{reason}' recorded.")
+
     outcome = SignalOutcome(
         signal_id=signal_id,
         folio=args.folio or "UNKNOWN",
         reviewer_or_contractor=contractor,
         shown_to_customer_at=datetime.now(timezone.utc).isoformat(),
         customer_viewed=True,
+        contractor_selected=args.selected or bool(args.appointment or args.won),
         customer_exported=args.exported,
-        customer_contacted=args.contacted,
-        customer_marked_useful=args.useful,
+        customer_contacted=args.contacted or bool(args.appointment or args.won),
+        customer_marked_useful=args.useful or bool(args.appointment or args.won),
         customer_marked_bad=args.bad,
-        appointment=args.appointment,
+        appointment=args.appointment or bool(args.won),
+        estimate_amount=args.estimate_amount,
         won=args.won,
+        won_amount=args.won_amount,
         lost=args.lost,
-        disposition=args.disposition or ("CONVERTED" if args.won else ("INTERESTED" if args.useful else "PENDING")),
+        disposition=args.disposition or ("CONVERTED" if args.won else ("INTERESTED" if (args.useful or args.selected) else "PENDING")),
+        reason_code=reason,
         feedback_notes=notes,
     )
 
     out_id = outcome_storage.record_outcome(outcome)
     print(f"\n[✓] Recorded contractor outcome {out_id} for Signal {signal_id} ({contractor}).")
-    print(f"    Disposition: {outcome.disposition} | Useful: {outcome.customer_marked_useful} | Appointment: {outcome.appointment} | Won: {outcome.won}\n")
+    print(f"    Disposition: {outcome.disposition} | Selected: {outcome.contractor_selected} | Appointment: {outcome.appointment} | Won: {outcome.won}")
+    if outcome.reason_code:
+        print(f"    Reason Code: {outcome.reason_code}")
+    if outcome.estimate_amount or outcome.won_amount:
+        print(f"    Revenue Attribution: Estimate=${outcome.estimate_amount or 0:,.2f} | Won=${outcome.won_amount or 0:,.2f}\n")
     return 0
 
 
@@ -329,20 +359,52 @@ def handle_outcome_stats(args: argparse.Namespace) -> int:
     _, _, _, _, outcome_storage, _ = get_components()
     stats = outcome_storage.get_conversion_metrics()
 
-    print("\n" + "=" * 78)
-    print("  CONTRACTOR VALIDATION & OUTCOME TELEMETRY")
-    print("=" * 78)
+    print("\n" + "=" * 88)
+    print("  CONTRACTOR VALIDATION & OUTCOME TELEMETRY (THE CONVERSION MOAT)")
+    print("=" * 88)
     print(f"Total Feedback Records Tracked:    {stats['total_tracked']:,}")
-    print(f"Signals Viewed by Contractors:     {stats['viewed']:,}")
-    print(f"Signals Exported:                  {stats['exported']:,}")
-    print(f"Contractor Outreach Attempted:     {stats['contacted']:,} ({stats['contact_rate_pct']}%)")
-    print(f"Marked Useful / High Quality:      {stats['marked_useful']:,}")
-    print(f"Marked Bad / Low Quality:          {stats['marked_bad']:,}")
-    print(f"Estimator Appointments Scheduled:  {stats['appointments']:,}")
-    print(f"Deals Won:                         {stats['deals_won']:,}")
+    print(f"Signals Shown to Contractors:      {stats['viewed']:,}")
+    print(f"Contractor Selected for Pursuit:   {stats['selected']:,} ({stats['selection_rate_pct']}%)")
+    print(f"Homeowner Outreach Attempted:      {stats['contacted']:,} ({stats['contact_rate_pct']}%)")
+    print(f"Estimator Appointments Booked:     {stats['appointments']:,} ({stats['appointment_rate_pct']}%)")
+    print(f"Deals Won (Closed Revenue):        {stats['deals_won']:,} (Win Rate: {stats['win_rate_pct']}%)")
     print(f"Deals Lost:                        {stats['deals_lost']:,}")
-    print(f"Win Rate:                          {stats['win_rate_pct']}%")
-    print("=" * 78 + "\n")
+    print(f"Total Pipeline Quoted (Estimate):  ${stats['total_estimate_dollars']:,.2f}")
+    print(f"Total Attributed Won Revenue:      ${stats['total_won_dollars']:,.2f}\n")
+
+    if stats["by_reason"]:
+        print("--- Feedback Reason Breakdown ---")
+        for r_code, count in stats["by_reason"].items():
+            tag = "[+] GOOD" if r_code in POSITIVE_REASONS else "[-] BAD"
+            print(f"  {tag} {r_code:<28}: {count:>3} records")
+        print()
+
+    if stats["by_score_tier"]:
+        print("--- Conversion by Evidence Score Tier ---")
+        print(f"  {'Score Tier':<24} | {'Total':<6} | {'Selected':<8} | {'Appts':<6} | {'Won':<4} | {'Won Rev ($)':<12}")
+        print("  " + "-" * 72)
+        for tier, d in stats["by_score_tier"].items():
+            print(f"  {tier:<24} | {d['total']:<6} | {d['selected']:<8} | {d['appointments']:<6} | {d['won']:<4} | ${d['won_revenue']:>10,.2f}")
+        print()
+    print("=" * 88 + "\n")
+    return 0
+
+
+def handle_export_feeds(args: argparse.Namespace) -> int:
+    _, storage, _, _, _, _ = get_components()
+    print("\n" + "=" * 88)
+    print("  EXPORTING 3 COMMERCIAL VALUE STREAMS")
+    print("=" * 88)
+    res = storage.export_commercial_feeds(Path("data"))
+    print(f"[✓] Feed 1: NEW_PERMITTED_PROJECT (Suppliers/Distributors) : {res['feed_1_permitted_projects']:,} records")
+    print(f"    ↳ CSV: {res['files']['feed_1_csv']}")
+    print(f"    ↳ JSON: {res['files']['feed_1_json']}")
+    print(f"[✓] Feed 2: PRE_PERMIT_ROOF_OPPORTUNITY (Roofers)          : {res['feed_2_pre_permit_opportunities']:,} records")
+    print(f"    ↳ CSV: {res['files']['feed_2_csv']}")
+    print(f"    ↳ JSON: {res['files']['feed_2_json']}")
+    print(f"[✓] Feed 3: MARKET_INTELLIGENCE (Contractor Velocity)      : {res['feed_3_market_intelligence_contractors']:,} contractors")
+    print(f"    ↳ CSV: {res['files']['feed_3_csv']}")
+    print(f"    ↳ JSON: {res['files']['feed_3_json']}\n")
     return 0
 
 
@@ -450,6 +512,10 @@ def main() -> int:
     p_build = subparsers.add_parser("build-graph", help="Aggregate folios and generate evidence-backed signals")
     p_build.set_defaults(func=handle_build_graph)
 
+    # export-feeds
+    p_feeds = subparsers.add_parser("export-feeds", help="Export the 3 commercial feeds (Permitted, Pre-permit, Market Intel)")
+    p_feeds.set_defaults(func=handle_export_feeds)
+
     # export-validation-sample
     p_val = subparsers.add_parser("export-validation-sample", help="Generate stratified 100-record roofer validation sample")
     p_val.set_defaults(func=handle_export_validation_sample)
@@ -459,14 +525,18 @@ def main() -> int:
     p_outcome.add_argument("--signal-id", required=True, help="Signal ID (e.g. SIG-XXXXXXXXXXXX)")
     p_outcome.add_argument("--contractor", required=True, help="Contractor or reviewer name")
     p_outcome.add_argument("--folio", default="UNKNOWN", help="Property Folio")
+    p_outcome.add_argument("--selected", action="store_true", help="Contractor selected lead for active pursuit ('Pick 10')")
     p_outcome.add_argument("--useful", action="store_true", help="Contractor marked signal as useful/good")
     p_outcome.add_argument("--bad", action="store_true", help="Contractor marked signal as bad/inaccurate")
     p_outcome.add_argument("--contacted", action="store_true", help="Contractor reached out to property owner")
     p_outcome.add_argument("--exported", action="store_true", help="Contractor exported lead")
     p_outcome.add_argument("--appointment", action="store_true", help="Inspection/estimate appointment scheduled")
+    p_outcome.add_argument("--estimate-amount", type=float, default=None, help="Quote/estimate amount in dollars")
     p_outcome.add_argument("--won", action="store_true", help="Contract awarded / deal won")
+    p_outcome.add_argument("--won-amount", type=float, default=None, help="Closed contract revenue in dollars")
     p_outcome.add_argument("--lost", action="store_true", help="Deal lost / homeowner declined")
     p_outcome.add_argument("--disposition", choices=["PENDING", "INTERESTED", "REJECTED", "CONVERTED", "UNRESPONSIVE"], default=None)
+    p_outcome.add_argument("--reason", help="Structured reason code (e.g. confirmed_old_roof, roof_already_replaced)")
     p_outcome.add_argument("--notes", help="Qualitative feedback or interview notes")
     p_outcome.set_defaults(func=handle_record_outcome)
 

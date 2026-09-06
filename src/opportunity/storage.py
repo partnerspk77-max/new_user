@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -566,3 +566,156 @@ class OpportunityStorage:
         json_all: Path,
     ) -> Dict[str, int]:
         return self.export_signals(csv_roofers, csv_suppliers, json_all)
+
+    def get_contractor_market_intelligence(self, min_permits: int = 3) -> List[Dict[str, Any]]:
+        """
+        Aggregates contractor permit velocity, 30d growth rates, and market share.
+        Compares trailing 30 days vs prior 30 days.
+        """
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT MAX(issued_at) FROM permits WHERE issued_at IS NOT NULL")
+        max_row = cursor.fetchone()
+        if not max_row or not max_row[0]:
+            return []
+
+        max_dt = datetime.fromisoformat(max_row[0].replace("Z", "+00:00"))
+        t30_start = (max_dt - timedelta(days=30)).isoformat()
+        p30_start = (max_dt - timedelta(days=60)).isoformat()
+
+        query = """
+        WITH recent AS (
+            SELECT contractor_name, COUNT(*) as cnt_30d
+            FROM permits
+            WHERE contractor_name IS NOT NULL AND contractor_name != ''
+              AND issued_at >= ?
+            GROUP BY contractor_name
+        ),
+        prior AS (
+            SELECT contractor_name, COUNT(*) as cnt_prior_30d
+            FROM permits
+            WHERE contractor_name IS NOT NULL AND contractor_name != ''
+              AND issued_at >= ? AND issued_at < ?
+            GROUP BY contractor_name
+        ),
+        roofing AS (
+            SELECT contractor_name, COUNT(*) as roofing_cnt
+            FROM roofing_permits
+            WHERE contractor_name IS NOT NULL AND contractor_name != ''
+            GROUP BY contractor_name
+        ),
+        total AS (
+            SELECT contractor_name, COUNT(*) as total_permits, MAX(issued_at) as last_issued
+            FROM permits
+            WHERE contractor_name IS NOT NULL AND contractor_name != ''
+            GROUP BY contractor_name
+        )
+        SELECT
+            t.contractor_name,
+            t.total_permits,
+            COALESCE(r.cnt_30d, 0) as recent_30d_permits,
+            COALESCE(p.cnt_prior_30d, 0) as prior_30d_permits,
+            COALESCE(rf.roofing_cnt, 0) as roofing_permits_count,
+            t.last_issued
+        FROM total t
+        LEFT JOIN recent r ON t.contractor_name = r.contractor_name
+        LEFT JOIN prior p ON t.contractor_name = p.contractor_name
+        LEFT JOIN roofing rf ON t.contractor_name = rf.contractor_name
+        WHERE t.total_permits >= ?
+        ORDER BY recent_30d_permits DESC, t.total_permits DESC
+        """
+
+        cursor.execute(query, (t30_start, p30_start, t30_start, min_permits))
+        rows = cursor.fetchall()
+
+        results = []
+        for rank, r in enumerate(rows, start=1):
+            recent_30d = r["recent_30d_permits"]
+            prior_30d = r["prior_30d_permits"]
+            if prior_30d > 0:
+                growth_pct = round(((recent_30d - prior_30d) / prior_30d) * 100.0, 1)
+            elif recent_30d > 0:
+                growth_pct = 100.0
+            else:
+                growth_pct = 0.0
+
+            results.append({
+                "market_share_rank": rank,
+                "contractor_name": r["contractor_name"],
+                "total_permits": r["total_permits"],
+                "recent_30d_permits": recent_30d,
+                "prior_30d_permits": prior_30d,
+                "velocity_growth_pct": growth_pct,
+                "roofing_permits_count": r["roofing_permits_count"],
+                "last_permit_issued": r["last_issued"],
+            })
+
+        return results
+
+    def export_commercial_feeds(
+        self,
+        output_dir: Path = Path("data"),
+        min_permits: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Exports the 3 distinct commercial feeds:
+        Feed 1: NEW_PERMITTED_PROJECT (for suppliers / distributors)
+        Feed 2: PRE_PERMIT_ROOF_OPPORTUNITY (for roofing contractors)
+        Feed 3: MARKET_INTELLIGENCE (for suppliers, manufacturers, large roofers)
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        f1_csv = output_dir / "feed_permitted_projects_suppliers.csv"
+        f1_json = output_dir / "feed_permitted_projects_suppliers.json"
+
+        f2_csv = output_dir / "feed_pre_permit_roof_opportunities.csv"
+        f2_json = output_dir / "feed_pre_permit_roof_opportunities.json"
+
+        f3_csv = output_dir / "feed_contractor_market_intelligence.csv"
+        f3_json = output_dir / "feed_contractor_market_intelligence.json"
+
+        self.export_signals(
+            csv_roofers=f2_csv,
+            csv_suppliers=f1_csv,
+            json_all=output_dir / "property_signals.json",
+        )
+
+        suppliers_data = self.get_signals(audience="supplier", limit=5000)
+        with open(f1_json, "w", encoding="utf-8") as f:
+            json.dump(suppliers_data, f, indent=2)
+
+        roofers_data = self.get_signals(audience="roofer", limit=5000)
+        with open(f2_json, "w", encoding="utf-8") as f:
+            json.dump(roofers_data, f, indent=2)
+
+        intel_data = self.get_contractor_market_intelligence(min_permits=min_permits)
+        with open(f3_json, "w", encoding="utf-8") as f:
+            json.dump(intel_data, f, indent=2)
+
+        if intel_data:
+            with open(f3_csv, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=intel_data[0].keys())
+                writer.writeheader()
+                writer.writerows(intel_data)
+
+        # Backward compatibility aliases
+        self.export_signals(
+            output_dir / "property_signals_roofers.csv",
+            output_dir / "property_signals_suppliers.csv",
+            output_dir / "property_signals.json",
+        )
+
+        return {
+            "feed_1_permitted_projects": len(suppliers_data),
+            "feed_2_pre_permit_opportunities": len(roofers_data),
+            "feed_3_market_intelligence_contractors": len(intel_data),
+            "files": {
+                "feed_1_csv": str(f1_csv),
+                "feed_1_json": str(f1_json),
+                "feed_2_csv": str(f2_csv),
+                "feed_2_json": str(f2_json),
+                "feed_3_csv": str(f3_csv),
+                "feed_3_json": str(f3_json),
+            },
+        }

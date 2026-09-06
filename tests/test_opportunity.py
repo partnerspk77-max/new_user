@@ -301,11 +301,45 @@ class TestOpportunityStorageAndCLI:
         with patch("sys.argv", ["cli.py", "list-signals", "--limit", "5"]):
             assert main() == 0
 
-        with patch("sys.argv", ["cli.py", "signal-stats"]):
-            assert main() == 0
-
         with patch("sys.argv", ["cli.py", "list-opportunities", "--limit", "5"]):
             assert main() == 0
+
+        with patch("sys.argv", ["cli.py", "export-feeds"]):
+            assert main() == 0
+
+        with patch("sys.argv", ["cli.py", "export-validation-sample"]):
+            assert main() == 0
+
+        with patch("sys.argv", ["cli.py", "outcome-stats"]):
+            assert main() == 0
+
+    def test_commercial_feeds_and_market_intelligence(self, opp_db, sample_permits_dataset, tmp_path):
+        populate_test_db(opp_db, sample_permits_dataset)
+        storage = OpportunityStorage(opp_db)
+        engine = PropertyOpportunityEngine(opp_db)
+
+        timelines = engine.build_property_timelines()
+        storage.save_timelines(timelines)
+        signals = engine.generate_signals(timelines)
+        storage.save_signals(signals)
+
+        # Test market intelligence extraction
+        intel = storage.get_contractor_market_intelligence(min_permits=1)
+        assert len(intel) >= 1
+        top_contractor = intel[0]
+        assert "contractor_name" in top_contractor
+        assert "recent_30d_permits" in top_contractor
+        assert "velocity_growth_pct" in top_contractor
+        assert "market_share_rank" in top_contractor
+
+        # Test 3-feed export
+        feed_res = storage.export_commercial_feeds(tmp_path)
+        assert feed_res["feed_1_permitted_projects"] >= 1
+        assert feed_res["feed_2_pre_permit_opportunities"] >= 1
+        assert feed_res["feed_3_market_intelligence_contractors"] >= 1
+        assert Path(feed_res["files"]["feed_1_csv"]).exists()
+        assert Path(feed_res["files"]["feed_2_csv"]).exists()
+        assert Path(feed_res["files"]["feed_3_csv"]).exists()
 
 
 class TestParcelEnrichedOpportunityScoring:
