@@ -200,6 +200,48 @@ def handle_roofing_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_audit_roofing(args: argparse.Namespace) -> int:
+    from src.roofing.audit import CommercialAuditEngine
+    db, _, _, _, _ = get_roofing_components()
+    engine = CommercialAuditEngine(db)
+
+    print("\n[*] Running 200-record stratified commercial viability and precision audit...")
+    records = engine.run_200_record_audit()
+    metrics = engine.compute_audit_metrics(records)
+
+    csv_path = Path("data/roofing_commercial_audit_200.csv")
+    json_path = Path("data/roofing_commercial_audit_200.json")
+    engine.export_audit_files(records, csv_path, json_path)
+
+    print("\n" + "=" * 78)
+    print("  COMMERCIAL ROOFING AUDIT & ACTIONABILITY REPORT (200 RECORD SAMPLE)")
+    print("=" * 78)
+    print(f"Total Records Audited:                  {metrics['total_audited']}")
+    print(f"True Roofing Scope (Technical):         {metrics['true_roofing_count']} ({metrics['true_roofing_percentage']}%)")
+    print(f"Classification Precision:               {metrics['classification_precision']}%")
+    print(f"Licensed Contractor Already Attached:   {metrics['contractor_attached_count']} ({metrics['contractor_attached_percentage']}%)")
+    print(f"Owner-Builder / Unassigned Contractor:  {metrics['owner_builder_count']} ({metrics['owner_builder_percentage']}%)")
+    print(f"Fresh Records (<3 days from latest):    {metrics['fresh_less_than_3_days_count']} ({metrics['fresh_less_than_3_days_percentage']}%)\n")
+
+    print(f"ACTUAL ACTIONABLE SALES OPPORTUNITY:    {metrics['actual_sales_opportunity_count']} ({metrics['actual_sales_opportunity_percentage']}%)")
+    print("=" * 78)
+
+    print("\n--- Commercial Opportunity Breakdown ---")
+    for opp, count in sorted(metrics["opportunity_breakdown"].items(), key=lambda x: x[1], reverse=True):
+        pct = round((count / metrics["total_audited"]) * 100, 1)
+        print(f"  {opp:<35}: {count:>3} ({pct:>5.1f}%)")
+
+    print("\n--- Freshness Distribution (Across Sample) ---")
+    for tier, count in sorted(metrics["freshness_distribution"].items(), key=lambda x: x[1], reverse=True):
+        pct = round((count / metrics["total_audited"]) * 100, 1)
+        print(f"  {tier:<25}: {count:>3} ({pct:>5.1f}%)")
+
+    print(f"\n[✓] Audit details saved to:")
+    print(f"    - CSV:  {csv_path}")
+    print(f"    - JSON: {json_path}\n")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Miami-Dade Roofing Permit Intelligence & Classification CLI"
@@ -217,6 +259,9 @@ def main() -> int:
 
     p_stats = subparsers.add_parser("roofing-stats", help="Output comprehensive roofing analysis report")
     p_stats.set_defaults(func=handle_roofing_stats)
+
+    p_audit = subparsers.add_parser("audit-roofing", help="Run 200-record commercial viability audit")
+    p_audit.set_defaults(func=handle_audit_roofing)
 
     parsed_args = parser.parse_args()
     return parsed_args.func(parsed_args)
