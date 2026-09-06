@@ -310,8 +310,26 @@ class TestOpportunityStorageAndCLI:
         with patch("sys.argv", ["cli.py", "export-validation-sample"]):
             assert main() == 0
 
+        with patch("sys.argv", ["cli.py", "generate-interview-kit", "--count", "5"]):
+            assert main() == 0
+
         with patch("sys.argv", ["cli.py", "outcome-stats"]):
             assert main() == 0
+
+    def test_customer_dossier_observed_inference_unknown(self, opp_db, sample_permits_dataset):
+        populate_test_db(opp_db, sample_permits_dataset)
+        engine = PropertyOpportunityEngine(opp_db)
+        timelines = engine.build_property_timelines()
+        signals = engine.generate_signals(timelines)
+        assert len(signals) >= 1
+
+        dossier = signals[0].to_customer_dossier()
+        assert "observed" in dossier
+        assert "inference" in dossier
+        assert "unknown" in dossier
+        assert len(dossier["observed"]) >= 1
+        assert len(dossier["inference"]) >= 1
+        assert len(dossier["unknown"]) == 3
 
     def test_commercial_feeds_and_market_intelligence(self, opp_db, sample_permits_dataset, tmp_path):
         populate_test_db(opp_db, sample_permits_dataset)

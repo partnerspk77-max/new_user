@@ -154,6 +154,57 @@ class PropertySignal:
     def priority_score(self) -> float:
         return self.evidence_score
 
+    def to_customer_dossier(self) -> Dict[str, Any]:
+        """
+        Formats opportunity into explicit OBSERVED, INFERENCE, and UNKNOWN blocks
+        for credible, enterprise-grade customer presentations.
+        """
+        observed = []
+        if self.year_built:
+            observed.append(f"Building built: {self.year_built} (Age: {self.building_age} years)")
+        else:
+            observed.append("Building construction year: Unrecorded in county appraiser cache")
+
+        if self.roof_history_status == "VERIFIED_PRIOR_PERMIT":
+            observed.append("Prior roof permit: On record in municipal database")
+        else:
+            observed.append("Last roof permit found: None in recent dataset window")
+
+        if self.storm_event_type and self.storm_distance_miles is not None:
+            storm_str = f"NWS severe weather: {self.storm_event_type} {self.storm_distance_miles} miles away"
+            if self.storm_age_days is not None:
+                storm_str += f" ({int(self.storm_age_days)} days ago)"
+            observed.append(storm_str)
+
+        for c in self.corroborating_signals:
+            if not any(k in c for k in ("Structure built", "NWS", "Recent severe")):
+                observed.append(c)
+
+        inferences = [
+            f"Opportunity hypothesis: {self.recommended_action or 'Elevated probability of near-term roof work'}",
+            f"Signal Classification: {self.signal_type} (Evidence Score: {self.evidence_score:.1f}/100)",
+        ]
+        if self.estimated_roof_squares:
+            est_val = self.estimated_roof_squares * 500.0
+            inferences.append(f"Estimated project scale: ~{self.estimated_roof_squares:.1f} roof squares (~${est_val:,.0f} est. contract value)")
+
+        unknowns = [
+            "Physical roof covering condition uninspected on-site",
+            "Homeowner intent to reroof unverified (requires sales contact)",
+            "Insurance claim status unverified",
+        ]
+
+        return {
+            "signal_id": self.signal_id,
+            "folio": self.folio,
+            "address": self.address,
+            "owner_name": self.owner_name,
+            "dor_desc": self.dor_desc,
+            "observed": observed,
+            "inference": inferences,
+            "unknown": unknowns,
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["opportunity_id"] = self.opportunity_id

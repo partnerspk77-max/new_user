@@ -41,6 +41,7 @@ data/*.db-shm
 data/*.json
 data/*.jsonl
 data/*.csv
+data/*.txt
 logs/*.log
 !logs/.gitkeep
 !data/.gitkeep

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -314,6 +315,116 @@ def handle_export_validation_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_generate_interview_kit(args: argparse.Namespace) -> int:
+    sample_json = Path("data/roofer_validation_sample_100.json")
+    if not sample_json.exists():
+        print("\n[!] Validation sample not found. Run 'export-validation-sample' first.\n")
+        return 1
+
+    with open(sample_json, "r", encoding="utf-8") as f:
+        records = json.load(f)
+
+    count = min(args.count or 25, len(records))
+    rng = random.Random(args.seed if args.seed is not None else 42)
+    selected = rng.sample(records, count)
+
+    txt_lines = [
+        "=" * 88,
+        "  MIAMI-DADE ROOFING COMMERCIAL DISCOVERY INTERVIEW KIT",
+        f"  Contractor Review Packet ({count} Blind Property Evaluation Candidates)",
+        "=" * 88,
+        "INTERVIEW INSTRUCTION:",
+        "\"Out of these properties, which 10 would you actually spend sales / estimator resources pursuing?\"",
+        "-" * 88,
+        "",
+    ]
+
+    blind_records = []
+    for idx, r in enumerate(selected, start=1):
+        observed = []
+        if r.get("year_built"):
+            observed.append(f"Structure Built: {r['year_built']} ({r.get('building_age')} years old)")
+        else:
+            observed.append("Structure Built: Construction year unrecorded in county records")
+
+        if r.get("roof_history_status") == "VERIFIED_PRIOR_PERMIT":
+            observed.append("Roof History: Prior permit on record")
+        else:
+            observed.append("Roof History: No roof replacement permit in recent dataset window")
+
+        if r.get("storm_event_type") and r.get("storm_distance_miles") is not None:
+            s_age = f"{int(r['storm_age_days'])} days ago" if r.get("storm_age_days") is not None else "recently"
+            observed.append(f"Nearby Weather: NWS {r['storm_event_type']} {r['storm_distance_miles']} mi away ({s_age})")
+
+        for c in r.get("corroborating_signals", []):
+            if not any(k in c for k in ("Structure built", "NWS", "Recent severe")):
+                observed.append(c)
+
+        inferences = [
+            f"Opportunity Scope: {r.get('recommended_action') or 'Elevated probability of near-term roof work'}",
+        ]
+        if r.get("estimated_roof_squares"):
+            est_val = r["estimated_roof_squares"] * 500.0
+            inferences.append(f"Estimated Scale: ~{r['estimated_roof_squares']:.1f} squares (~${est_val:,.0f} est. contract value)")
+
+        unknowns = [
+            "Physical roof condition uninspected on-site",
+            "Homeowner intent unverified (requires sales contact)",
+            "Insurance claim status unverified",
+        ]
+
+        blind_obj = {
+            "item_number": idx,
+            "signal_id": r["signal_id"],
+            "folio": r["folio"],
+            "address": r.get("address"),
+            "owner_name": r.get("owner_name"),
+            "dor_desc": r.get("dor_desc"),
+            "observed": observed,
+            "inference": inferences,
+            "unknown": unknowns,
+        }
+        blind_records.append(blind_obj)
+
+        txt_lines.append(f"[{idx:>2}] PROPERTY: {r.get('address')} (Folio: {r['folio']}) | ID: {r['signal_id']}")
+        owner = r.get("owner_name")
+        if owner:
+            txt_lines.append(f"     Owner: {owner}")
+        txt_lines.append("     OBSERVED:")
+        for o in observed:
+            txt_lines.append(f"       ✓ {o}")
+        txt_lines.append("     INFERENCE:")
+        for inf in inferences:
+            txt_lines.append(f"       → {inf}")
+        txt_lines.append("     UNKNOWN:")
+        for u in unknowns:
+            txt_lines.append(f"       ? {u}")
+        txt_lines.append("     [ ] SELECT TO PURSUE     [ ] REJECT (Reason: ____________________)")
+        txt_lines.append("-" * 88)
+
+    txt_path = Path("data/contractor_interview_kit_25.txt")
+    json_path = Path("data/contractor_interview_kit_25.json")
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(txt_lines))
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(blind_records, f, indent=2)
+
+    print("\n" + "=" * 88)
+    print("  CONTRACTOR DISCOVERY INTERVIEW KIT GENERATED")
+    print("=" * 88)
+    print(f"Generated {count} randomized, blind property evaluation profiles.")
+    print("All internal scores and Grade A/B/C labels are completely omitted to prevent evaluation bias.\n")
+    print(f"[✓] Printable Review Sheet: {txt_path}")
+    print(f"[✓] Blind JSON Payload:     {json_path}\n")
+    print("Protocol Question:")
+    print("  \"Out of these properties, which 10 would you actually spend sales / estimator resources pursuing?\"")
+    print("\nRecord selections using:")
+    print("  python -m src.opportunity.cli record-outcome --signal-id <ID> --contractor <NAME> --selected\n")
+    return 0
+
+
 def handle_record_outcome(args: argparse.Namespace) -> int:
     _, _, _, _, outcome_storage, _ = get_components()
     signal_id = args.signal_id
@@ -519,6 +630,12 @@ def main() -> int:
     # export-validation-sample
     p_val = subparsers.add_parser("export-validation-sample", help="Generate stratified 100-record roofer validation sample")
     p_val.set_defaults(func=handle_export_validation_sample)
+
+    # generate-interview-kit
+    p_kit = subparsers.add_parser("generate-interview-kit", help="Generate randomized blind evaluation packet for contractor interviews")
+    p_kit.add_argument("--count", type=int, default=25, help="Number of blind properties to sample (default: 25)")
+    p_kit.add_argument("--seed", type=int, default=None, help="Random seed for reproducible randomized order")
+    p_kit.set_defaults(func=handle_generate_interview_kit)
 
     # record-outcome
     p_outcome = subparsers.add_parser("record-outcome", help="Record contractor feedback and sales conversion outcome")

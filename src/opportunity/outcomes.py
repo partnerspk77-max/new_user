@@ -20,14 +20,20 @@ POSITIVE_REASONS = {
     "homeowner_interested",
     "inspection_booked",
     "insurance_claim",
+    "good_opportunity",
 }
 
 NEGATIVE_REASONS = {
     "roof_already_replaced",
     "wrong_property",
+    "too_old",
+    "bad_storm_signal",
+    "not_residential",
+    "already_have_relationship",
+    "too_difficult_to_contact",
+    "not_enough_evidence",
     "commercial_not_relevant",
     "duplicate",
-    "too_old",
     "storm_signal_inaccurate",
     "no_owner_contact",
 }
