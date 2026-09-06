@@ -1,0 +1,157 @@
+name: Miami-Dade Permits Ingestion Pipeline
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Pipeline Command to execute'
+        required: true
+        default: 'sync'
+        type: choice
+        options:
+          - sync
+          - backfill
+          - inspect
+          - export-json
+      days:
+        description: 'Days for historical backfill (default: 90)'
+        required: false
+        default: '90'
+      start_date:
+        description: 'Explicit start date for backfill (YYYY-MM-DD)'
+        required: false
+        default: ''
+      end_date:
+        description: 'Explicit end date for backfill (YYYY-MM-DD)'
+        required: false
+        default: ''
+      overlap_minutes:
+        description: 'Overlap window in minutes for incremental sync (default: 120)'
+        required: false
+        default: '120'
+      commit_data:
+        description: 'Commit data/permits.json back to repository'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  ingest:
+    name: Run Permit Ingestion Pipeline
+    runs-on: ubuntu-latest
+
+    env:
+      # Secrets configured in repository Settings -> Secrets and variables -> Actions
+      # If secret is set, it overrides defaults; keeps public repo clean & flexible
+      MIAMI_DADE_PERMITS_URL: ${{ secrets.MIAMI_DADE_PERMITS_URL || vars.MIAMI_DADE_PERMITS_URL || 'https://gisweb.miamidade.gov/arcgis/rest/services/MD_LandInformation/MapServer/1/query' }}
+      ARCGIS_API_TOKEN: ${{ secrets.ARCGIS_API_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL || 'sqlite:///data/permits.db' }}
+      PERMIT_PAGE_SIZE: ${{ vars.PERMIT_PAGE_SIZE || '1000' }}
+      PERMIT_REQUEST_TIMEOUT: ${{ vars.PERMIT_REQUEST_TIMEOUT || '30' }}
+      PERMIT_MAX_RETRIES: ${{ vars.PERMIT_MAX_RETRIES || '5' }}
+      PERMIT_INCREMENTAL_OVERLAP_MINUTES: ${{ inputs.overlap_minutes || vars.PERMIT_INCREMENTAL_OVERLAP_MINUTES || '120' }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Hermetic Test Suite
+        run: |
+          pytest -v tests/
+
+      - name: Restore SQLite Database Cache
+        if: "!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite')"
+        uses: actions/cache/restore@v4
+        with:
+          path: data/permits.db
+          key: permits-db-${{ github.ref_name }}
+          restore-keys: |
+            permits-db-
+
+      # 1. Backfill Command
+      - name: Execute Historical Backfill
+        if: "${{ github.event.inputs.command == 'backfill' }}"
+        run: |
+          CMD="python -m src.cli backfill --days ${{ github.event.inputs.days || '90' }}"
+          if [ -n "${{ github.event.inputs.start_date }}" ]; then
+            CMD="$CMD --start-date ${{ github.event.inputs.start_date }}"
+          fi
+          if [ -n "${{ github.event.inputs.end_date }}" ]; then
+            CMD="$CMD --end-date ${{ github.event.inputs.end_date }}"
+          fi
+          echo "Executing: $CMD"
+          $CMD
+
+      # 2. Incremental Sync Command (Default on scheduled runs or manual sync)
+      - name: Execute Incremental Synchronization
+        if: "${{ github.event_name == 'schedule' || github.event.inputs.command == 'sync' || github.event.inputs.command == '' }}"
+        run: |
+          python -m src.cli sync --overlap-minutes ${{ github.event.inputs.overlap_minutes || '120' }}
+
+      # 3. Discovery Tooling Report
+      - name: Generate Discovery & Statistics Report
+        if: always()
+        run: |
+          python -m src.cli inspect
+
+      # 4. JSON Dataset Export
+      - name: Export JSON Dataset
+        if: always()
+        run: |
+          python -m src.cli export-json --output data/permits.json
+
+      # 5. Save SQLite Database Cache for Subsequent Runs
+      - name: Save SQLite Database Cache
+        if: "always() && (!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite'))"
+        uses: actions/cache/save@v4
+        with:
+          path: data/permits.db
+          key: permits-db-${{ github.ref_name }}-${{ github.run_id }}
+
+      # 6. Optional Git Commit of Data Export
+      - name: Commit Updated permits.json
+        if: "${{ github.event.inputs.commit_data == true }}"
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          git add data/permits.json
+          git diff-index --quiet HEAD || (git commit -m "chore(data): automated permit sync [skip ci]" && git push)
+
+      # 7. Upload Artifacts (Database & JSON)
+      - name: Archive Permit Dataset Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: permits-dataset
+          path: |
+            data/permits.db
+            data/permits.json
+          retention-days: 30
+
+      # 8. Upload Execution Logs
+      - name: Archive Execution Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execution-logs
+          path: |
+            logs/*.log
+          retention-days: 14
