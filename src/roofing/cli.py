@@ -80,7 +80,7 @@ def handle_classify_roofing(args: argparse.Namespace) -> int:
     rejected_count = 0
     ambiguous_count = 0
     rule_classified = 0
-    ai_classified = 0
+    semantic_rules_classified = 0
 
     job_type_counts = {}
 
@@ -93,7 +93,7 @@ def handle_classify_roofing(args: argparse.Namespace) -> int:
             if classification.classification_source == "rule":
                 rule_classified += 1
             else:
-                ai_classified += 1
+                semantic_rules_classified += 1
 
             if classification.is_roofing:
                 confirmed_roofing += 1
@@ -120,7 +120,7 @@ def handle_classify_roofing(args: argparse.Namespace) -> int:
     print(f"Rejected / Non-Roofing:     {rejected_count:,} ({round(rejected_count/total_permits*100, 2)}%)")
     print(f"Ambiguous Scope:            {ambiguous_count:,}")
     print()
-    print(f"Provenance: Rule-based:     {rule_classified:,} | AI Semantic: {ai_classified:,}")
+    print(f"Provenance: Rule-based:     {rule_classified:,} | Semantic Rules: {semantic_rules_classified:,}")
     print(f"Duration:                   {duration}s\n")
 
     print("--- Breakdown by Roofing Job Type ---")
@@ -219,17 +219,18 @@ def handle_audit_roofing(args: argparse.Namespace) -> int:
     print(f"Total Records Audited:                  {metrics['total_audited']}")
     print(f"True Roofing Scope (Technical):         {metrics['true_roofing_count']} ({metrics['true_roofing_percentage']}%)")
     print(f"Classification Precision:               {metrics['classification_precision']}%")
-    print(f"Licensed Contractor Already Attached:   {metrics['contractor_attached_count']} ({metrics['contractor_attached_percentage']}%)")
+    print(f"Licensed Contractor Attached:           {metrics['contractor_present_count']} ({metrics['contractor_present_percentage']}%)")
     print(f"Owner-Builder / Unassigned Contractor:  {metrics['owner_builder_count']} ({metrics['owner_builder_percentage']}%)")
-    print(f"Fresh Records (<3 days from latest):    {metrics['fresh_less_than_3_days_count']} ({metrics['fresh_less_than_3_days_percentage']}%)\n")
+    print(f"Fresh Records (<3 days from now):       {metrics['fresh_less_than_3_days_count']} ({metrics['fresh_less_than_3_days_percentage']}%)\n")
 
-    print(f"ACTUAL ACTIONABLE SALES OPPORTUNITY:    {metrics['actual_sales_opportunity_count']} ({metrics['actual_sales_opportunity_percentage']}%)")
+    print(f"TRACK A: Active Supplier Job Sites:     {metrics['supplier_actionable_count']} ({metrics['supplier_actionable_percentage']}%)")
+    print(f"TRACK B: Unassigned Roofer Prospects:   {metrics['roofer_unassigned_count']} ({metrics['roofer_unassigned_percentage']}%)")
     print("=" * 78)
 
-    print("\n--- Commercial Opportunity Breakdown ---")
-    for opp, count in sorted(metrics["opportunity_breakdown"].items(), key=lambda x: x[1], reverse=True):
+    print("\n--- Commercial Segment Breakdown ---")
+    for seg, count in sorted(metrics["commercial_segment_breakdown"].items(), key=lambda x: x[1], reverse=True):
         pct = round((count / metrics["total_audited"]) * 100, 1)
-        print(f"  {opp:<35}: {count:>3} ({pct:>5.1f}%)")
+        print(f"  {seg:<35}: {count:>3} ({pct:>5.1f}%)")
 
     print("\n--- Freshness Distribution (Across Sample) ---")
     for tier, count in sorted(metrics["freshness_distribution"].items(), key=lambda x: x[1], reverse=True):

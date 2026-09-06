@@ -46,8 +46,8 @@ class RoofingClassification:
     job_type: str
     confidence: float
     reason: str
-    classification_source: str  # 'rule', 'ai', 'rule_and_ai', 'manual_review'
-    classification_model: str = "miami-dade-roofing-classifier"
+    classification_source: str  # 'rule', 'semantic_rules', 'llm_ai', 'manual_review'
+    classification_model: str = "miami-dade-semantic-rules-v1"
     classification_version: str = "1.0.0"
     classification_timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()

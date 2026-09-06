@@ -1,8 +1,8 @@
 """
-Hybrid deterministic and semantic AI classifier for Miami-Dade Roofing permits.
+Hybrid deterministic and semantic rule classifier for Miami-Dade Roofing permits.
 Features:
 - High-precision deterministic rules for high-confidence candidates
-- Semantic AI classification for ambiguous and cross-trade candidates
+- Semantic pattern rules for ambiguous and cross-trade candidates
 - Deterministic hashing and persistent caching to prevent redundant execution
 - Complete provenance tracking: source, confidence, reason, model, version, timestamp
 """
@@ -27,7 +27,7 @@ from src.roofing.models import (
 class RoofingClassifier:
     """Classifies permit candidates into standardized roofing job types."""
 
-    MODEL_NAME = "miami-dade-roofing-expert-v1"
+    MODEL_NAME = "miami-dade-semantic-rules-v1"
     MODEL_VERSION = "1.0.0"
 
     def __init__(self, cache_store: Optional[Any] = None):
@@ -41,7 +41,7 @@ class RoofingClassifier:
     def classify(self, permit: Dict[str, Any], candidate_result: CandidateResult) -> RoofingClassification:
         """
         Classifies permit using deterministic rules first, delegating ambiguous
-        cases to the semantic AI engine with cache lookup.
+        cases to semantic rules engine with cache lookup.
         """
         # If not flagged as candidate, immediate rule rejection
         if not candidate_result.is_candidate:
@@ -71,11 +71,11 @@ class RoofingClassifier:
                 self.cache_store.set(cache_key, rule_decision.to_dict())
             return rule_decision
 
-        # Step 2: Semantic AI Evaluation for Ambiguous Candidates
-        ai_decision = self._evaluate_semantic_ai(permit, norm_text, candidate_result)
+        # Step 2: Semantic Rules Evaluation for Ambiguous Candidates
+        semantic_decision = self._evaluate_semantic_rules(permit, norm_text, candidate_result)
         if self.cache_store:
-            self.cache_store.set(cache_key, ai_decision.to_dict())
-        return ai_decision
+            self.cache_store.set(cache_key, semantic_decision.to_dict())
+        return semantic_decision
 
     def _evaluate_rules(
         self,
@@ -195,17 +195,17 @@ class RoofingClassifier:
                 classification_source="rule",
             )
 
-        # Return None to trigger Semantic AI Review
+        # Return None to trigger Semantic Rules Review
         return None
 
-    def _evaluate_semantic_ai(
+    def _evaluate_semantic_rules(
         self,
         permit: Dict[str, Any],
         norm_text: str,
         candidate: CandidateResult,
     ) -> RoofingClassification:
         """
-        Deep semantic analysis for ambiguous candidates (e.g. cross-trade permits,
+        Semantic rule analysis for ambiguous candidates (e.g. cross-trade permits,
         multi-trade scopes, typos, or unclear comments).
         """
         comment = str(permit.get("comment") or "").upper()
@@ -220,7 +220,7 @@ class RoofingClassifier:
                 job_type="OTHER_ROOFING",
                 confidence=0.78,
                 reason="Stair and roof wall structural repair scope.",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -231,7 +231,7 @@ class RoofingClassifier:
                 job_type="OTHER_ROOFING",
                 confidence=0.82,
                 reason="Non-structural aluminum canopy/patio roof covering.",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -242,7 +242,7 @@ class RoofingClassifier:
                 job_type="OTHER_ROOFING",
                 confidence=0.85,
                 reason="Liquid-applied roof deck waterproofing or elastomeric coating.",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -253,7 +253,7 @@ class RoofingClassifier:
                 job_type="AMBIGUOUS",
                 confidence=0.60,
                 reason="Permit filed under window/door category but includes reroof comment; requires verification.",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -264,7 +264,7 @@ class RoofingClassifier:
                 job_type="ROOF_REPAIR",
                 confidence=0.80,
                 reason="Structural fire damage restoration including roof repair.",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -275,7 +275,7 @@ class RoofingClassifier:
                 job_type="OTHER_ROOFING",
                 confidence=0.75,
                 reason=f"Matches roofing candidate criteria: {'; '.join(candidate.candidate_reasons[:2])}",
-                classification_source="ai",
+                classification_source="semantic_rules",
                 classification_model=self.MODEL_NAME,
             )
 
@@ -284,6 +284,6 @@ class RoofingClassifier:
             job_type="NOT_ROOFING",
             confidence=0.70,
             reason="Ambiguous context with insufficient evidence of roofing trade work.",
-            classification_source="ai",
+            classification_source="semantic_rules",
             classification_model=self.MODEL_NAME,
         )

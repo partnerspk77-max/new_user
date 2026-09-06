@@ -27,30 +27,31 @@ from src.storage.database import Database
 class CommercialAuditEngine:
     """Executes stratified 200-record audit and computes commercial lead conversion metrics."""
 
-    REFERENCE_DATE = "2026-09-03T00:00:00Z"
-
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, ref_dt: Optional[datetime] = None):
         self.db = db
-        self.ref_dt = datetime.fromisoformat(self.REFERENCE_DATE.replace("Z", "+00:00"))
+        self.ref_dt = ref_dt or datetime.now(timezone.utc)
 
-    def _calculate_freshness(self, issued_at: Optional[str]) -> Tuple[Optional[int], str]:
+    def _calculate_freshness(self, issued_at: Optional[str]) -> Tuple[Optional[float], Optional[float], str]:
         if not issued_at:
-            return None, "UNKNOWN"
+            return None, None, "UNKNOWN"
         try:
             dt = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
-            diff_days = max(0, (self.ref_dt - dt).days)
-            if diff_days <= 1:
-                return diff_days, "NEW (0-24h)"
-            elif diff_days <= 3:
-                return diff_days, "FRESH (1-3d)"
-            elif diff_days <= 7:
-                return diff_days, "RECENT (4-7d)"
-            elif diff_days <= 30:
-                return diff_days, "STALE (8-30d)"
+            age_seconds = max(0.0, (self.ref_dt - dt).total_seconds())
+            age_hours = round(age_seconds / 3600.0, 2)
+            age_days = round(age_seconds / 86400.0, 2)
+            if age_hours <= 24.0:
+                tier = "NEW (0-24h)"
+            elif age_hours <= 72.0:
+                tier = "FRESH (1-3d)"
+            elif age_hours <= 168.0:
+                tier = "RECENT (4-7d)"
+            elif age_hours <= 720.0:
+                tier = "STALE (8-30d)"
             else:
-                return diff_days, "HISTORICAL (30d+)"
+                tier = "HISTORICAL (30d+)"
+            return age_hours, age_days, tier
         except Exception:
-            return None, "UNKNOWN"
+            return None, None, "UNKNOWN"
 
     def _check_related_project(self, folio: Optional[str], permit_number: str) -> Optional[str]:
         if not folio or not folio.strip():
@@ -130,14 +131,14 @@ class CommercialAuditEngine:
         current_job = p.get("roofing_job_type")
         issued_at = p.get("issued_at")
 
-        age_days, freshness_tier = self._calculate_freshness(issued_at)
+        age_hours, age_days, freshness_tier = self._calculate_freshness(issued_at)
         related_project = self._check_related_project(p.get("folio"), p.get("permit_number"))
 
         # 1. Determine True Roofing
         # True roofing means building envelope roof covering installation, reroofing, or repair.
         # False positives / cross-trade:
         is_solar = cat1 == "0034" or "SOLAR" in comment or current_job == "SOLAR_ROOF_RELATED"
-        is_curb = cat1 == "0050" or "RAISE EXISTING ROOF" in comment or "ROOF MOUNT" in comment and cat1 in ["0003", "0050"]
+        is_curb = cat1 == "0050" or "RAISE EXISTING ROOF" in comment or ("ROOF MOUNT" in comment and cat1 in ["0003", "0050"])
         is_aluminum_patio = "ALUM" in comment and ("TERR" in comment or "AWN" in comment or cat1 == "0029")
         is_temp_power = "TEMP" in comment and "POW" in comment
 
@@ -172,40 +173,34 @@ class CommercialAuditEngine:
                 corrected_job = "ROOF_REPLACEMENT"
             true_roofing_reason = f"Legitimate roof system work under Category {cat1} ({desc1})."
 
-        # 2. Contractor & Owner-Builder status
+        # 2. Contractor & Owner-Builder status (Objective facts)
         is_owner_builder = (
             not contractor
             or "OWNER" in contractor.upper()
             or "UNASSIGNED" in contractor.upper()
             or contractor.upper() in ["NONE", "NULL"]
         )
-        contractor_attached = not is_owner_builder
+        contractor_present = not is_owner_builder
 
-        # 3. Actual Commercial Sales Opportunity for ANOTHER Roofer?
-        # A licensed roofer looking for leads cannot sell to a job already won and under contract.
+        # 3. Commercial Value Streams (Objective actionability)
+        # Track A: Project Intelligence for Material Suppliers, Distributors (ABC Supply, Beacon), Canvassers
+        supplier_actionable = true_roofing and status == "A"
+
+        # Track B: Direct Roofer Opportunity (Unassigned / Owner-Builder where homeowner has no licensed roofer)
+        roofer_unassigned_actionable = true_roofing and status == "A" and not contractor_present
+
         if not true_roofing:
-            sales_opportunity = False
-            opportunity_type = "NON_ROOFING_TRADE"
-            opportunity_reason = "Scope is solar, HVAC equipment, or non-roofing specialty trade."
+            commercial_segment = "NON_ROOFING_TRADE"
+            commercial_use_case = "Cross-trade / Non-envelope scope (Solar PV, HVAC curb raise, Awning)."
         elif status == "F":
-            sales_opportunity = False
-            opportunity_type = "COMPLETED_HISTORICAL"
-            opportunity_reason = "Permit is Finalized (passed final inspection). Job is already 100% completed."
-        elif contractor_attached:
-            # A licensed roofing contractor is already on the permit
-            sales_opportunity = False
-            opportunity_type = "COMPETITOR_ALREADY_WON"
-            opportunity_reason = f"Job already contracted & permitted by licensed roofer: '{contractor}'."
+            commercial_segment = "COMPLETED_PROJECT_HISTORY"
+            commercial_use_case = "Passed final inspection. Market intelligence & historical pricing."
+        elif not contractor_present:
+            commercial_segment = "UNASSIGNED_OWNER_BUILDER"
+            commercial_use_case = "Direct homeowner prospect: permit pulled without licensed roofer."
         else:
-            # Owner-builder or unassigned contractor
-            if freshness_tier in ["NEW (0-24h)", "FRESH (1-3d)", "RECENT (4-7d)"]:
-                sales_opportunity = True
-                opportunity_type = "HIGH_VALUE_OWNER_BUILDER"
-                opportunity_reason = "Fresh active permit without licensed roofer; homeowner pulled permit and may need contractor."
-            else:
-                sales_opportunity = False
-                opportunity_type = "STALE_OWNER_BUILDER"
-                opportunity_reason = f"Owner-builder permit is {age_days} days old ({freshness_tier}); likely work already in progress."
+            commercial_segment = "ACTIVE_PERMITTED_PROJECT"
+            commercial_use_case = f"Material supply & sub-trade lead: contractor '{contractor}' attached."
 
         return {
             "permit_id": p.get("permit_id"),
@@ -224,17 +219,19 @@ class CommercialAuditEngine:
             "residential_commercial": p.get("residential_commercial"),
             "status": status,
             "issued_at": issued_at,
+            "age_hours": age_hours,
             "age_days": age_days,
             "freshness_tier": freshness_tier,
             "current_classification": current_job,
             "proposed_corrected_classification": corrected_job,
             "is_true_roofing": true_roofing,
             "true_roofing_reason": true_roofing_reason,
-            "contractor_attached": contractor_attached,
+            "contractor_present": contractor_present,
             "is_owner_builder": is_owner_builder,
-            "is_actual_sales_opportunity": sales_opportunity,
-            "opportunity_type": opportunity_type,
-            "opportunity_reason": opportunity_reason,
+            "supplier_actionable": supplier_actionable,
+            "roofer_unassigned_actionable": roofer_unassigned_actionable,
+            "commercial_segment": commercial_segment,
+            "commercial_use_case": commercial_use_case,
             "duplicate_or_related_project": related_project or "Single Independent Permit",
         }
 
@@ -243,9 +240,10 @@ class CommercialAuditEngine:
         total = len(audited_records)
 
         true_roofing_count = sum(1 for r in audited_records if r["is_true_roofing"])
-        sales_opportunity_count = sum(1 for r in audited_records if r["is_actual_sales_opportunity"])
-        contractor_attached_count = sum(1 for r in audited_records if r["contractor_attached"])
+        contractor_present_count = sum(1 for r in audited_records if r["contractor_present"])
         owner_builder_count = sum(1 for r in audited_records if r["is_owner_builder"])
+        supplier_actionable_count = sum(1 for r in audited_records if r["supplier_actionable"])
+        roofer_unassigned_count = sum(1 for r in audited_records if r["roofer_unassigned_actionable"])
         fresh_count = sum(1 for r in audited_records if r["freshness_tier"] in ["NEW (0-24h)", "FRESH (1-3d)"])
 
         classification_matches = sum(
@@ -253,10 +251,10 @@ class CommercialAuditEngine:
             if r["current_classification"] == r["proposed_corrected_classification"]
         )
 
-        opportunity_breakdown = {}
+        segment_breakdown = {}
         for r in audited_records:
-            ot = r["opportunity_type"]
-            opportunity_breakdown[ot] = opportunity_breakdown.get(ot, 0) + 1
+            seg = r["commercial_segment"]
+            segment_breakdown[seg] = segment_breakdown.get(seg, 0) + 1
 
         freshness_dist = {}
         for r in audited_records:
@@ -268,15 +266,17 @@ class CommercialAuditEngine:
             "true_roofing_count": true_roofing_count,
             "true_roofing_percentage": round((true_roofing_count / total) * 100, 2),
             "classification_precision": round((classification_matches / total) * 100, 2),
-            "actual_sales_opportunity_count": sales_opportunity_count,
-            "actual_sales_opportunity_percentage": round((sales_opportunity_count / total) * 100, 2),
-            "contractor_attached_count": contractor_attached_count,
-            "contractor_attached_percentage": round((contractor_attached_count / total) * 100, 2),
+            "contractor_present_count": contractor_present_count,
+            "contractor_present_percentage": round((contractor_present_count / total) * 100, 2),
             "owner_builder_count": owner_builder_count,
             "owner_builder_percentage": round((owner_builder_count / total) * 100, 2),
+            "supplier_actionable_count": supplier_actionable_count,
+            "supplier_actionable_percentage": round((supplier_actionable_count / total) * 100, 2),
+            "roofer_unassigned_count": roofer_unassigned_count,
+            "roofer_unassigned_percentage": round((roofer_unassigned_count / total) * 100, 2),
             "fresh_less_than_3_days_count": fresh_count,
             "fresh_less_than_3_days_percentage": round((fresh_count / total) * 100, 2),
-            "opportunity_breakdown": opportunity_breakdown,
+            "commercial_segment_breakdown": segment_breakdown,
             "freshness_distribution": freshness_dist,
         }
 
