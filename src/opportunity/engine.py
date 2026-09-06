@@ -1,24 +1,29 @@
 """
-Property Opportunity Engine for Miami-Dade County.
-Analyzes multi-trade timelines across all unique folios (8,362+ properties)
-to generate high-precision opportunities for:
-- Track A: Project Intelligence (Material Suppliers, Distributors, Canvassers)
-- Track B: Pre-Permit Opportunities (Roofing Contractors seeking uncontracted owners)
+Property Opportunity & Signal Engine for Miami-Dade County.
+Synthesizes multi-trade histories across all unique folios (8,362+ properties)
+into transparent, evidence-backed commercial signals.
+Adopts the Signal -> Evidence -> Opportunity -> Verified Lead mental model.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.opportunity.models import CommercialOpportunity, PropertyTimeline
+from src.opportunity.models import (
+    PropertySignal,
+    PropertyTimeline,
+    SignalStatus,
+    SignalType,
+)
 from src.storage.database import Database
 
 
 class PropertyOpportunityEngine:
-    """Processes parcel permit histories into multi-trade timelines and actionable leads."""
+    """Processes parcel permit histories into multi-trade timelines and stateful commercial signals."""
 
     def __init__(self, db: Database, ref_dt: Optional[datetime] = None):
         self.db = db
@@ -56,6 +61,21 @@ class PropertyOpportunityEngine:
         return True
 
     @staticmethod
+    def _determine_roof_system(cat1: Optional[str], comment: str, desc1: str) -> Optional[str]:
+        """Detects roofing material system from category codes and descriptions."""
+        if cat1 == "0095" or "SHINGLE" in comment or "SHINGLE" in desc1:
+            return "ASPHALT_SHINGLE"
+        if cat1 == "0107" or "TILE" in comment or "TILE" in desc1:
+            return "CONCRETE_OR_CLAY_TILE"
+        if cat1 == "0096" or "METAL" in comment or "METAL" in desc1:
+            return "METAL_OR_WOOD_SHAKE"
+        if cat1 == "0092" or any(w in comment for w in ["GRAVEL", "SBS", "SINGLE PLY", "TPO", "EPDM", "MODIFIED"]):
+            return "COMMERCIAL_MEMBRANE"
+        if cat1 == "0109" or "WATERPROOF" in comment or "WATERPROOF" in desc1:
+            return "WATERPROOFING_DECK_COATING"
+        return "GENERAL_ROOF_COVERING"
+
+    @staticmethod
     def _identify_renovation_signals(permit: Dict[str, Any]) -> List[str]:
         """Classifies the trade scope and specific modernization action."""
         signals = []
@@ -86,12 +106,12 @@ class PropertyOpportunityEngine:
 
     def build_property_timelines(self) -> Dict[str, PropertyTimeline]:
         """
-        Groups all permits in the database by Folio to build rich property histories.
+        Groups all permits in the database by Folio to build rich property histories,
+        deriving roof history, trade velocity, and modernization patterns.
         """
         conn = self.db.get_connection()
         cursor = conn.cursor()
 
-        # Query all permits, joined with roofing classification if available
         cursor.execute(
             """
             SELECT p.*, r.roofing_job_type, r.roofing_confidence, r.classification_source
@@ -116,11 +136,14 @@ class PropertyOpportunityEngine:
             rescomm = next((p["residential_commercial"] for p in reversed(permits) if p.get("residential_commercial")), None)
 
             trades_set = set()
+            active_trades_set = set()
             contractors_set = set()
             renovation_types_set = set()
             roof_permits_count = 0
             has_active_roof_permit = False
             last_roof_permit_date = None
+            last_roof_system = None
+            last_roof_contractor = None
             has_active_non_roof_permit = False
 
             first_date = permits[0].get("issued_at")
@@ -128,19 +151,27 @@ class PropertyOpportunityEngine:
 
             for p in permits:
                 ptype = p.get("permit_type")
+                status = p.get("status")
                 if ptype:
                     trades_set.add(ptype)
+                    if status == "A":
+                        active_trades_set.add(ptype)
 
                 cname = p.get("contractor_name")
                 if self._is_contractor_present(cname):
                     contractors_set.add(cname.strip())
 
                 is_roofing = bool(p.get("roofing_job_type") and p.get("roofing_job_type") not in ["NOT_ROOFING", "SOLAR_ROOF_RELATED"])
-                status = p.get("status")
 
                 if is_roofing:
                     roof_permits_count += 1
                     last_roof_permit_date = p.get("issued_at")
+                    cat1 = str(p.get("category_1") or "")
+                    comment = str(p.get("comment") or "").upper()
+                    desc1 = str(p.get("description_1") or "").upper()
+                    last_roof_system = self._determine_roof_system(cat1, comment, desc1)
+                    if self._is_contractor_present(cname):
+                        last_roof_contractor = cname.strip()
                     if status == "A":
                         has_active_roof_permit = True
                 else:
@@ -150,14 +181,28 @@ class PropertyOpportunityEngine:
                     if status == "A":
                         has_active_non_roof_permit = True
 
+            # Calculate years since last roof permit if one exists
+            years_since_roof = None
+            if last_roof_permit_date:
+                try:
+                    dt = datetime.fromisoformat(last_roof_permit_date.replace("Z", "+00:00"))
+                    diff_days = max(0, (self.ref_dt - dt).days)
+                    years_since_roof = round(diff_days / 365.25, 1)
+                except Exception:
+                    years_since_roof = None
+
             timelines[folio] = PropertyTimeline(
                 folio=folio,
                 address=primary_address,
                 total_permits=len(permits),
                 trades=sorted(list(trades_set)),
+                active_trades=sorted(list(active_trades_set)),
                 roof_permits_count=roof_permits_count,
                 has_active_roof_permit=has_active_roof_permit,
                 last_roof_permit_date=last_roof_permit_date,
+                years_since_last_roof_permit=years_since_roof,
+                last_roof_system=last_roof_system,
+                last_roof_contractor=last_roof_contractor,
                 has_active_non_roof_permit=has_active_non_roof_permit,
                 non_roof_renovation_types=sorted(list(renovation_types_set)),
                 contractors_seen=sorted(list(contractors_set)),
@@ -169,20 +214,26 @@ class PropertyOpportunityEngine:
 
         return timelines
 
-    def generate_opportunities(
+    @staticmethod
+    def _compute_signal_id(folio: str, signal_type: str, trade_scope: str) -> str:
+        """Generates deterministic persistent identity for stateful lifecycle tracking."""
+        key = f"{folio}:{signal_type}:{trade_scope}"
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12].upper()
+        return f"SIG-{digest}"
+
+    def generate_signals(
         self,
         timelines: Dict[str, PropertyTimeline],
-    ) -> List[CommercialOpportunity]:
+    ) -> List[PropertySignal]:
         """
-        Generates actionable commercial opportunities for both Track A and Track B.
+        Generates evidence-backed property signals using an additive, transparent scoring rubric.
         """
-        opportunities: List[CommercialOpportunity] = []
-        opp_id_counter = 1
+        signals: List[PropertySignal] = []
 
         for folio, timeline in timelines.items():
             # -------------------------------------------------------------
-            # TRACK A: Project Intelligence for Material Suppliers & Distributors
-            # Targets properties with active roofing permits
+            # TRACK A: Permitted Projects (Suppliers & Canvassers)
+            # Objective fact: a roofing permit exists and is active
             # -------------------------------------------------------------
             for p in timeline.permits:
                 job_type = p.get("roofing_job_type")
@@ -193,54 +244,65 @@ class PropertyOpportunityEngine:
                     cname = p.get("contractor_name")
                     contractor_present = self._is_contractor_present(cname)
 
-                    # Fresh active roof permits are prime distributor leads
-                    if age_hours is not None and age_hours <= 168.0:
-                        opp_type = "NEW_ROOF_PERMIT"
-                        base_priority = 85.0
-                        if age_hours <= 24.0:
-                            priority = base_priority + 15.0
-                        elif age_hours <= 72.0:
-                            priority = base_priority + 10.0
-                        else:
-                            priority = base_priority + 5.0
+                    # Fresh active roof permits are high-priority material supply dispatches
+                    is_new = age_hours is not None and age_hours <= 168.0
+                    sig_type = SignalType.NEW_ROOF_PERMIT if is_new else SignalType.ACTIVE_ROOF_PROJECT
 
-                        event = f"Brand new roofing permit issued ({int(age_hours)}h ago) to {cname or 'Owner-Builder'}"
-                        action = "Supply dispatch: quote shingles/tile/membrane, delivery logistics, and neighbor canvassing"
-                    else:
-                        opp_type = "ACTIVE_ROOF_PROJECT"
-                        priority = 65.0
-                        event = f"Active roofing job site permitted {int(age_days or 0)} days ago"
-                        action = "Job site intelligence: accessory supply, equipment rental, or sub-trade engagement"
+                    score_breakdown = {
+                        "base_permit_verification": 50.0,
+                        "freshness_bonus": 35.0 if (age_hours is not None and age_hours <= 24.0) else (25.0 if (age_hours is not None and age_hours <= 72.0) else 15.0),
+                        "contractor_verified": 10.0 if contractor_present else 0.0,
+                    }
+                    total_score = round(sum(score_breakdown.values()), 1)
 
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_id=f"OPP-SUP-{opp_id_counter:06d}",
+                    corroborating = [
+                        f"Active permitted roofing job under Category {p.get('category_1')} ({p.get('description_1')})",
+                        f"Contractor on record: {cname if contractor_present else 'Unassigned / Owner-Builder'}",
+                        f"Issued {int(age_hours or 0)} hours ago ({freshness})",
+                    ]
+                    unverified = [
+                        "Job progress and tear-off schedule uninspected on site",
+                        "Material supplier preference of contractor not yet confirmed",
+                    ]
+
+                    action = (
+                        "Material dispatch: quote shingles/tile/membrane, delivery logistics, and neighbor canvassing"
+                        if is_new
+                        else "Job site intelligence: accessory supply, equipment rental, or sub-trade engagement"
+                    )
+
+                    signals.append(
+                        PropertySignal(
+                            signal_id=self._compute_signal_id(folio, sig_type, str(p.get("permit_number"))),
                             folio=folio,
                             address=p.get("address") or timeline.address,
-                            opportunity_type=opp_type,
+                            signal_type=sig_type,
                             target_audience="SUPPLIER_DISTRIBUTOR",
-                            priority_score=round(priority, 1),
+                            status=SignalStatus.ACTIVE,
+                            evidence_score=total_score,
+                            evidence_breakdown=score_breakdown,
+                            corroborating_signals=corroborating,
+                            unverified_assumptions=unverified,
                             freshness_tier=freshness,
                             age_hours=age_hours,
                             age_days=age_days,
                             contractor_present=contractor_present,
                             contractor_name=cname if contractor_present else None,
                             trigger_trade="ROOF",
-                            trigger_event=event,
+                            trigger_event=f"Active roofing permit ({p.get('permit_number')}) issued to {cname or 'Owner-Builder'}",
                             recommended_action=action,
                             residential_commercial=timeline.residential_commercial,
                             latitude=p.get("latitude"),
                             longitude=p.get("longitude"),
                         )
                     )
-                    opp_id_counter += 1
 
             # -------------------------------------------------------------
-            # TRACK B: Pre-Permit & Uncontracted Opportunities for Roofing Contractors
+            # TRACK B: Modernization & Renovation Signals (Roofing Contractors)
+            # Factual signals and hypotheses for uncontracted roof assessments
             # -------------------------------------------------------------
-            
-            # Opportunity B1: Unassigned / Owner-Builder Active Roof Permits
-            # Direct prospect where homeowner has NO licensed roofer on file!
+
+            # Signal B1: Owner-Builder Roof Filing (Uncontracted direct prospect)
             for p in timeline.permits:
                 job_type = p.get("roofing_job_type")
                 status = p.get("status")
@@ -253,16 +315,35 @@ class PropertyOpportunityEngine:
                 ):
                     issued_at = p.get("issued_at")
                     age_hours, age_days, freshness = self._calculate_freshness(issued_at)
-                    priority = 95.0 if (age_hours is not None and age_hours <= 168.0) else 80.0
 
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_id=f"OPP-ROOF-{opp_id_counter:06d}",
+                    score_breakdown = {
+                        "uncontracted_owner_filing": 50.0,
+                        "freshness_bonus": 35.0 if (age_hours is not None and age_hours <= 72.0) else (20.0 if (age_hours is not None and age_hours <= 168.0) else 10.0),
+                        "residential_scope": 10.0 if timeline.residential_commercial == "RESIDENTIAL" else 5.0,
+                    }
+                    total_score = round(sum(score_breakdown.values()), 1)
+
+                    corroborating = [
+                        "Homeowner pulled official roofing permit with NO licensed roofing contractor assigned",
+                        f"Permit status Active, issued {int(age_hours or 0)} hours ago ({freshness})",
+                    ]
+                    unverified = [
+                        "Owner may intend to self-perform labor under Florida owner-builder exemption statute 489.103(7)",
+                        "Owner may have private unrecorded handshake agreement with an uncertified installer",
+                    ]
+
+                    signals.append(
+                        PropertySignal(
+                            signal_id=self._compute_signal_id(folio, SignalType.OWNER_BUILDER_ROOF_SIGNAL, str(p.get("permit_number"))),
                             folio=folio,
                             address=p.get("address") or timeline.address,
-                            opportunity_type="UNASSIGNED_ROOF_PERMIT",
+                            signal_type=SignalType.OWNER_BUILDER_ROOF_SIGNAL,
                             target_audience="ROOFING_CONTRACTOR",
-                            priority_score=round(priority, 1),
+                            status=SignalStatus.ACTIVE,
+                            evidence_score=total_score,
+                            evidence_breakdown=score_breakdown,
+                            corroborating_signals=corroborating,
+                            unverified_assumptions=unverified,
                             freshness_tier=freshness,
                             age_hours=age_hours,
                             age_days=age_days,
@@ -270,21 +351,17 @@ class PropertyOpportunityEngine:
                             contractor_name=None,
                             trigger_trade="ROOF",
                             trigger_event="Owner-builder pulled roof permit with NO licensed roofing contractor assigned",
-                            recommended_action="Direct homeowner outreach: offer licensed contractor takeover to pass mandatory inspections",
+                            recommended_action="Direct homeowner outreach: offer licensed contractor takeover to guarantee mandatory inspection pass",
                             residential_commercial=timeline.residential_commercial,
                             latitude=p.get("latitude"),
                             longitude=p.get("longitude"),
                         )
                     )
-                    opp_id_counter += 1
 
-            # Opportunity B2: Major Renovation with NO Roof Permit (Pre-Permit Roofer Prospect)
-            # Property has active major renovations (AC, impact windows, repiping, alterations)
-            # but ZERO roofing permits on file!
+            # Signal B2: Multi-Trade Renovation Signal (Hypothesis: Heavy Capital Modernization with NO Roof Permit)
             if not timeline.has_active_roof_permit and timeline.has_active_non_roof_permit:
                 reno_types = timeline.non_roof_renovation_types
                 if reno_types:
-                    # Find latest active non-roof permit for freshness calculation
                     active_non_roof = [
                         p for p in timeline.permits
                         if p.get("status") == "A" and not p.get("roofing_job_type")
@@ -292,50 +369,96 @@ class PropertyOpportunityEngine:
                     latest_p = active_non_roof[-1] if active_non_roof else timeline.permits[-1]
                     age_hours, age_days, freshness = self._calculate_freshness(latest_p.get("issued_at"))
 
-                    # Multi-trade velocity calculation
-                    trade_count = len(timeline.trades)
+                    # Transparent Additive Scoring Rubric (Max 100)
+                    # 1. Renovation Velocity (0-35)
+                    trade_count = len(timeline.active_trades)
                     if trade_count >= 3:
-                        priority = 88.0
+                        velocity_pts = 35.0
+                    elif "HVAC_AC_REPLACEMENT" in reno_types and "WINDOW_DOOR_RETROFIT" in reno_types:
+                        velocity_pts = 30.0
                     elif "HVAC_AC_REPLACEMENT" in reno_types or "WINDOW_DOOR_RETROFIT" in reno_types:
-                        priority = 82.0
+                        velocity_pts = 20.0
                     else:
-                        priority = 74.0
+                        velocity_pts = 15.0
 
-                    # Adjust for freshness
+                    # 2. Roof Permit History (0-35)
+                    if timeline.roof_permits_count == 0:
+                        roof_history_pts = 25.0  # Zero roof permits on record in dataset
+                        roof_note = "Zero roofing permits on record in county dataset"
+                    elif timeline.years_since_last_roof_permit is not None:
+                        if timeline.years_since_last_roof_permit >= 15.0:
+                            roof_history_pts = 35.0
+                            roof_note = f"Last roof permit was {timeline.years_since_last_roof_permit} years ago"
+                        elif timeline.years_since_last_roof_permit >= 10.0:
+                            roof_history_pts = 20.0
+                            roof_note = f"Last roof permit was {timeline.years_since_last_roof_permit} years ago"
+                        else:
+                            roof_history_pts = 5.0
+                            roof_note = f"Roof was permitted relatively recently ({timeline.years_since_last_roof_permit} yrs ago)"
+                    else:
+                        roof_history_pts = 20.0
+                        roof_note = "Historical roof permit date unrecorded"
+
+                    # 3. Freshness of Renovation Activity (0-20)
                     if age_hours is not None and age_hours <= 72.0:
-                        priority += 8.0
+                        freshness_pts = 20.0
                     elif age_hours is not None and age_hours <= 168.0:
-                        priority += 4.0
+                        freshness_pts = 12.0
+                    elif age_hours is not None and age_hours <= 720.0:
+                        freshness_pts = 5.0
+                    else:
+                        freshness_pts = 2.0
+
+                    # 4. Property Scale (0-10)
+                    scale_pts = 10.0 if timeline.residential_commercial == "RESIDENTIAL" else 5.0
+
+                    score_breakdown = {
+                        "renovation_velocity": velocity_pts,
+                        "roof_history": roof_history_pts,
+                        "activity_freshness": freshness_pts,
+                        "property_scale": scale_pts,
+                    }
+                    total_score = round(min(100.0, sum(score_breakdown.values())), 1)
 
                     reno_str = ", ".join(reno_types[:3])
-                    event_desc = f"Active modernization in progress ({reno_str}) with NO roof permit on record"
-                    action_desc = "Pre-permit sales outreach: owner is investing heavily in property; pitch insurance roof upgrade while trades are active"
+                    corroborating = [
+                        f"Active multi-trade modernization: {reno_str}",
+                        roof_note,
+                        f"Latest permit activity issued {int(age_days or 0)} days ago ({freshness})",
+                    ]
+                    unverified = [
+                        "Physical roof covering age and condition uninspected (requires on-site assessment)",
+                        "Building year-built and square footage unverified (pending Property Appraiser parcel integration)",
+                        "Owner may have replaced roof without permits or roof may still have remaining useful life",
+                    ]
 
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_id=f"OPP-ROOF-{opp_id_counter:06d}",
+                    signals.append(
+                        PropertySignal(
+                            signal_id=self._compute_signal_id(folio, SignalType.PROPERTY_RENOVATION_SIGNAL, "MULTI_TRADE"),
                             folio=folio,
                             address=timeline.address,
-                            opportunity_type="PROPERTY_RENOVATION_OPPORTUNITY",
+                            signal_type=SignalType.PROPERTY_RENOVATION_SIGNAL,
                             target_audience="ROOFING_CONTRACTOR",
-                            priority_score=round(min(98.0, priority), 1),
+                            status=SignalStatus.ACTIVE,
+                            evidence_score=total_score,
+                            evidence_breakdown=score_breakdown,
+                            corroborating_signals=corroborating,
+                            unverified_assumptions=unverified,
                             freshness_tier=freshness,
                             age_hours=age_hours,
                             age_days=age_days,
                             contractor_present=True,
                             contractor_name=timeline.contractors_seen[-1] if timeline.contractors_seen else None,
                             trigger_trade="MULTI_TRADE",
-                            trigger_event=event_desc,
-                            recommended_action=action_desc,
+                            trigger_event=f"Active modernization in progress ({reno_str}) with no active roof permit",
+                            recommended_action="Pre-permit hypothesis outreach: property undergoing capital improvements; offer insurance roof inspection while trades are active",
                             residential_commercial=timeline.residential_commercial,
                             latitude=latest_p.get("latitude"),
                             longitude=latest_p.get("longitude"),
                         )
                     )
-                    opp_id_counter += 1
 
-            # Opportunity B3: Active Solar PV Installation with NO Recent Roof Permit
-            # In Florida, solar installations often mandate reroofing if the roof is >8 years old
+            # Signal B3: Solar Attachment Filing (Hypothesis: Roof assessment candidate prior to PV mounting)
             has_solar = any(
                 p.get("category_1") == "0034" or "SOLAR" in str(p.get("comment") or "").upper()
                 for p in timeline.permits
@@ -348,27 +471,54 @@ class PropertyOpportunityEngine:
                 )
                 age_hours, age_days, freshness = self._calculate_freshness(solar_permit.get("issued_at"))
 
-                opportunities.append(
-                    CommercialOpportunity(
-                        opportunity_id=f"OPP-ROOF-{opp_id_counter:06d}",
+                score_breakdown = {
+                    "solar_attachment_filing": 45.0,
+                    "no_roof_permit_on_record": 25.0,
+                    "freshness_bonus": 15.0 if (age_hours is not None and age_hours <= 168.0) else 5.0,
+                }
+                total_score = round(sum(score_breakdown.values()), 1)
+
+                corroborating = [
+                    "Active rooftop solar PV permit filed on property",
+                    "No roof permit recorded in county dataset",
+                    f"Filing freshness: {freshness}",
+                ]
+                unverified = [
+                    "Existing roof may already be structurally sound or newer than dataset window",
+                    "Specific utility/jurisdiction reroof requirement unverified for this installation",
+                ]
+
+                signals.append(
+                    PropertySignal(
+                        signal_id=self._compute_signal_id(folio, SignalType.SOLAR_ROOF_SIGNAL, str(solar_permit.get("permit_number"))),
                         folio=folio,
                         address=timeline.address,
-                        opportunity_type="SOLAR_REROOF_OPPORTUNITY",
+                        signal_type=SignalType.SOLAR_ROOF_SIGNAL,
                         target_audience="ROOFING_CONTRACTOR",
-                        priority_score=91.0,
+                        status=SignalStatus.ACTIVE,
+                        evidence_score=total_score,
+                        evidence_breakdown=score_breakdown,
+                        corroborating_signals=corroborating,
+                        unverified_assumptions=unverified,
                         freshness_tier=freshness,
                         age_hours=age_hours,
                         age_days=age_days,
                         contractor_present=self._is_contractor_present(solar_permit.get("contractor_name")),
                         contractor_name=solar_permit.get("contractor_name"),
                         trigger_trade="ELEC",
-                        trigger_event="Active Solar PV permit filed with no roof permit on file; roof replacement or certification needed prior to solar installation",
-                        recommended_action="Offer pre-solar roof certification and reroofing to prevent future solar array detach & reset costs",
+                        trigger_event="Active Solar PV permit filed with no roof permit on record",
+                        recommended_action="Pre-solar roof inspection outreach: offer roof certification prior to solar panel installation",
                         residential_commercial=timeline.residential_commercial,
                         latitude=solar_permit.get("latitude"),
                         longitude=solar_permit.get("longitude"),
                     )
                 )
-                opp_id_counter += 1
 
-        return opportunities
+        return signals
+
+    def generate_opportunities(
+        self,
+        timelines: Dict[str, PropertyTimeline],
+    ) -> List[PropertySignal]:
+        """Backward compatibility alias for generate_signals."""
+        return self.generate_signals(timelines)
