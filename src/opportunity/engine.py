@@ -1,8 +1,8 @@
 """
 Property Opportunity & Signal Engine for Miami-Dade County.
-Synthesizes multi-trade histories across all unique folios (8,362+ properties)
-and integrates Property Appraiser (PaGISView) structural data into transparent,
-evidence-backed commercial signals.
+Synthesizes multi-trade histories across all unique folios (8,362+ properties),
+integrates Property Appraiser (PaGISView) structural data, and correlates
+NOAA / National Weather Service severe storm events into evidence-backed signals.
 Adopts the Signal -> Evidence -> Opportunity -> Verified Lead mental model.
 """
 
@@ -22,14 +22,36 @@ from src.opportunity.models import (
     SignalType,
 )
 from src.storage.database import Database
+from src.weather.correlator import StormCorrelator
+from src.weather.models import StormEvent
 
 
 class PropertyOpportunityEngine:
-    """Processes parcel permit histories and property appraiser attributes into stateful signals."""
+    """Processes parcel permit histories, appraisal data, and storm swaths into stateful signals."""
 
-    def __init__(self, db: Database, ref_dt: Optional[datetime] = None):
+    def __init__(
+        self,
+        db: Database,
+        ref_dt: Optional[datetime] = None,
+        storm_correlator: Optional[StormCorrelator] = None,
+    ):
         self.db = db
         self.ref_dt = ref_dt or datetime.now(timezone.utc)
+        self.storm_correlator = storm_correlator
+
+    def _get_storm_correlator(self) -> Optional[StormCorrelator]:
+        if self.storm_correlator is not None:
+            return self.storm_correlator
+        try:
+            from src.weather.storage import StormStorage
+            storage = StormStorage(self.db)
+            events = storage.get_all_storm_events()
+            if events:
+                self.storm_correlator = StormCorrelator(events)
+                return self.storm_correlator
+        except Exception:
+            pass
+        return None
 
     def _calculate_freshness(self, issued_at: Optional[str]) -> Tuple[Optional[float], Optional[float], str]:
         if not issued_at:
@@ -114,7 +136,6 @@ class PropertyOpportunityEngine:
         Groups all permits in the database by Folio to build rich property histories,
         deriving roof history, trade velocity, and joining Property Appraiser structural facts.
         """
-        # Load cached parcels if not provided
         if parcels_map is None:
             try:
                 from src.enrichment.storage import ParcelStorage
@@ -216,7 +237,6 @@ class PropertyOpportunityEngine:
             owner_name = parcel.owner_name if parcel else None
             assessed_val = parcel.assessed_value if parcel else None
 
-            # If parcel provides site address and timeline address is missing, use it
             if not primary_address and parcel and parcel.site_address:
                 primary_address = parcel.site_address
 
@@ -262,16 +282,44 @@ class PropertyOpportunityEngine:
     ) -> List[PropertySignal]:
         """
         Generates evidence-backed property signals using an additive, transparent scoring rubric
-        corroborated by physical Property Appraiser structural characteristics.
+        corroborated by physical Property Appraiser structural characteristics and NOAA storm events.
         """
         signals: List[PropertySignal] = []
+        storm_correlator = self._get_storm_correlator()
 
         for folio, timeline in timelines.items():
             # Disqualify reference folios or unplatted utility tracts
             if timeline.dor_desc and ("REFERENCE" in timeline.dor_desc.upper() or "VACANT" in timeline.dor_desc.upper()):
                 if timeline.roof_permits_count == 0 and not timeline.has_active_roof_permit:
-                    # Skip speculative renovation signals on vacant land
                     continue
+
+            # Check geospatial storm correlation for this property
+            latest_permit = timeline.permits[-1] if timeline.permits else {}
+            lat = latest_permit.get("latitude")
+            lon = latest_permit.get("longitude")
+
+            storm_match = storm_correlator.find_nearest_storm(lat, lon, ref_dt=self.ref_dt) if storm_correlator else None
+            storm_ev, storm_dist, storm_age = storm_match if storm_match else (None, None, None)
+
+            storm_event_type = storm_ev.event_type if storm_ev else None
+            storm_distance_miles = storm_dist
+            storm_event_date = storm_ev.event_time if storm_ev else None
+            storm_age_days = storm_age
+            storm_mag_str = f"{storm_ev.magnitude} {storm_ev.unit}" if (storm_ev and storm_ev.magnitude) else None
+
+            # Calculate storm evidence score points (0-25)
+            storm_points = 0.0
+            storm_corrob_note = None
+            if storm_ev and storm_dist is not None and storm_age is not None:
+                if storm_dist <= 3.0 and storm_age <= 30.0:
+                    storm_points = 25.0
+                    storm_corrob_note = f"Recent severe {storm_ev.event_type} ({storm_mag_str or 'impact'}) occurred {storm_dist} miles away {int(storm_age)} days ago"
+                elif storm_dist <= 5.0 and storm_age <= 60.0:
+                    storm_points = 15.0
+                    storm_corrob_note = f"NWS verified {storm_ev.event_type} within {storm_dist} miles ({int(storm_age)} days ago)"
+                elif storm_dist <= 10.0 and any(k in storm_ev.event_type for k in ("TROPICAL", "TORNADO", "HIGH WIND")):
+                    storm_points = 10.0
+                    storm_corrob_note = f"Regional tropical/tornado hazard within {storm_dist} miles ({int(storm_age)} days ago)"
 
             # -------------------------------------------------------------
             # TRACK A: Permitted Projects (Suppliers & Canvassers)
@@ -286,7 +334,6 @@ class PropertyOpportunityEngine:
                     cname = p.get("contractor_name")
                     contractor_present = self._is_contractor_present(cname)
 
-                    # Fresh active roof permits are high-priority material supply dispatches
                     is_new = age_hours is not None and age_hours <= 168.0
                     sig_type = SignalType.NEW_ROOF_PERMIT if is_new else SignalType.ACTIVE_ROOF_PROJECT
 
@@ -295,13 +342,18 @@ class PropertyOpportunityEngine:
                         "freshness_bonus": 35.0 if (age_hours is not None and age_hours <= 24.0) else (25.0 if (age_hours is not None and age_hours <= 72.0) else 15.0),
                         "contractor_verified": 10.0 if contractor_present else 0.0,
                     }
-                    total_score = round(sum(score_breakdown.values()), 1)
+                    if storm_points > 0:
+                        score_breakdown["storm_urgency_bonus"] = storm_points
+
+                    total_score = round(min(100.0, sum(score_breakdown.values())), 1)
 
                     corroborating = [
                         f"Active permitted roofing job under Category {p.get('category_1')} ({p.get('description_1')})",
                         f"Contractor on record: {cname if contractor_present else 'Unassigned / Owner-Builder'}",
                         f"Issued {int(age_hours or 0)} hours ago ({freshness})",
                     ]
+                    if storm_corrob_note:
+                        corroborating.append(storm_corrob_note)
                     if timeline.building_actual_area:
                         corroborating.append(f"Building footprint: {int(timeline.building_actual_area):,} sq ft (~{timeline.estimated_roof_squares} roofing squares)")
                     if timeline.owner_name:
@@ -339,15 +391,22 @@ class PropertyOpportunityEngine:
                             trigger_event=f"Active roofing permit ({p.get('permit_number')}) issued to {cname or 'Owner-Builder'}",
                             recommended_action=action,
                             residential_commercial=timeline.residential_commercial,
-                            latitude=p.get("latitude"),
-                            longitude=p.get("longitude"),
+                            latitude=p.get("latitude") or lat,
+                            longitude=p.get("longitude") or lon,
                             year_built=timeline.year_built,
                             building_age=timeline.building_age,
+                            year_built_status=timeline.year_built_status,
+                            roof_history_status=timeline.roof_history_status,
                             building_actual_area=timeline.building_actual_area,
                             estimated_roof_squares=timeline.estimated_roof_squares,
                             owner_name=timeline.owner_name,
                             dor_desc=timeline.dor_desc,
                             assessed_value=timeline.assessed_value,
+                            storm_event_type=storm_event_type,
+                            storm_distance_miles=storm_distance_miles,
+                            storm_event_date=storm_event_date,
+                            storm_age_days=storm_age_days,
+                            storm_magnitude=storm_mag_str,
                         )
                     )
 
@@ -412,19 +471,26 @@ class PropertyOpportunityEngine:
                             trigger_event="Owner-builder pulled roof permit with NO licensed roofing contractor assigned",
                             recommended_action="Direct homeowner outreach: offer licensed contractor takeover to guarantee mandatory inspection pass",
                             residential_commercial=timeline.residential_commercial,
-                            latitude=p.get("latitude"),
-                            longitude=p.get("longitude"),
+                            latitude=p.get("latitude") or lat,
+                            longitude=p.get("longitude") or lon,
                             year_built=timeline.year_built,
                             building_age=timeline.building_age,
+                            year_built_status=timeline.year_built_status,
+                            roof_history_status=timeline.roof_history_status,
                             building_actual_area=timeline.building_actual_area,
                             estimated_roof_squares=timeline.estimated_roof_squares,
                             owner_name=timeline.owner_name,
                             dor_desc=timeline.dor_desc,
                             assessed_value=timeline.assessed_value,
+                            storm_event_type=storm_event_type,
+                            storm_distance_miles=storm_distance_miles,
+                            storm_event_date=storm_event_date,
+                            storm_age_days=storm_age_days,
+                            storm_magnitude=storm_mag_str,
                         )
                     )
 
-            # Signal B2: Multi-Trade Renovation Signal (Hypothesis: Heavy Capital Modernization with NO Roof Permit)
+            # Signal B2: Multi-Trade Renovation Signal (Hypothesis: Modernization + Aging Roof)
             if not timeline.has_active_roof_permit and timeline.has_active_non_roof_permit:
                 reno_types = timeline.non_roof_renovation_types
                 if reno_types:
@@ -448,7 +514,7 @@ class PropertyOpportunityEngine:
                         velocity_pts = 15.0
 
                     # 2. Roof History & Physical Structure Age (0-35)
-                    # Corroborated with Property Appraiser physical year_built!
+                    # Explicit epistemic handling: verified vs unrecorded
                     if timeline.years_since_last_roof_permit is not None:
                         if timeline.years_since_last_roof_permit >= 15.0:
                             roof_history_pts = 35.0
@@ -502,6 +568,9 @@ class PropertyOpportunityEngine:
                         "activity_freshness": freshness_pts,
                         "property_scale": scale_pts,
                     }
+                    if storm_points > 0:
+                        score_breakdown["storm_evidence"] = storm_points
+
                     total_score = round(min(100.0, sum(score_breakdown.values())), 1)
 
                     reno_str = ", ".join(reno_types[:3])
@@ -510,21 +579,26 @@ class PropertyOpportunityEngine:
                         roof_note,
                         f"Latest permit activity issued {int(age_days or 0)} days ago ({freshness})",
                     ]
+                    if storm_corrob_note:
+                        corroborating.append(storm_corrob_note)
                     if timeline.building_actual_area:
                         corroborating.append(f"Building area: {int(timeline.building_actual_area):,} sq ft (~{timeline.estimated_roof_squares} squares)")
                     if timeline.owner_name:
                         corroborating.append(f"Recorded owner: {timeline.owner_name}")
 
+                    # Epistemic assumptions: clear boundaries on missing vs verified
                     if timeline.building_age is not None and timeline.building_age >= 10:
                         unverified = [
                             "Physical roof covering uninspected on-site; age inferred from Property Appraiser construction record",
                             "Owner may have replaced roof prior to dataset window without pulling permits or using unpermitted labor",
+                            "Homeowner intent and insurance claim status unverified (requires field inspection)",
                         ]
                     else:
                         unverified = [
                             "Zero roof permits in dataset window does not confirm property has never had a roof replacement",
                             "Physical roof covering age and condition uninspected (requires Property Appraiser year_built or on-site assessment)",
                             "Owner may have replaced roof prior to dataset window or roof may still have remaining useful life",
+                            "Homeowner intent and insurance claim status unverified (requires field inspection)",
                         ]
 
                     signals.append(
@@ -548,15 +622,22 @@ class PropertyOpportunityEngine:
                             trigger_event=f"Active modernization in progress ({reno_str}) with no active roof permit",
                             recommended_action="Pre-permit hypothesis outreach: property undergoing capital improvements; offer insurance roof inspection while trades are active",
                             residential_commercial=timeline.residential_commercial,
-                            latitude=latest_p.get("latitude"),
-                            longitude=latest_p.get("longitude"),
+                            latitude=latest_p.get("latitude") or lat,
+                            longitude=latest_p.get("longitude") or lon,
                             year_built=timeline.year_built,
                             building_age=timeline.building_age,
+                            year_built_status=timeline.year_built_status,
+                            roof_history_status=timeline.roof_history_status,
                             building_actual_area=timeline.building_actual_area,
                             estimated_roof_squares=timeline.estimated_roof_squares,
                             owner_name=timeline.owner_name,
                             dor_desc=timeline.dor_desc,
                             assessed_value=timeline.assessed_value,
+                            storm_event_type=storm_event_type,
+                            storm_distance_miles=storm_distance_miles,
+                            storm_event_date=storm_event_date,
+                            storm_age_days=storm_age_days,
+                            storm_magnitude=storm_mag_str,
                         )
                     )
 
@@ -580,6 +661,8 @@ class PropertyOpportunityEngine:
                 }
                 if timeline.building_age is not None and timeline.building_age >= 20:
                     score_breakdown["aging_structure_bonus"] = 10.0
+                if storm_points > 0:
+                    score_breakdown["storm_evidence"] = storm_points
 
                 total_score = round(min(100.0, sum(score_breakdown.values())), 1)
 
@@ -590,12 +673,15 @@ class PropertyOpportunityEngine:
                 ]
                 if timeline.building_age is not None:
                     corroborating.append(f"Structure built in {timeline.year_built} ({timeline.building_age} yrs old)")
+                if storm_corrob_note:
+                    corroborating.append(storm_corrob_note)
                 if timeline.owner_name:
                     corroborating.append(f"Recorded owner: {timeline.owner_name}")
 
                 unverified = [
                     "Existing roof may already be structurally sound or newer than dataset window",
                     "Specific utility/jurisdiction reroof requirement unverified for this installation",
+                    "Homeowner intent and insurance claim status unverified (requires field inspection)",
                 ]
 
                 signals.append(
@@ -619,15 +705,22 @@ class PropertyOpportunityEngine:
                         trigger_event="Active Solar PV permit filed with no roof permit on record",
                         recommended_action="Pre-solar roof inspection outreach: offer roof certification prior to solar panel installation",
                         residential_commercial=timeline.residential_commercial,
-                        latitude=solar_permit.get("latitude"),
-                        longitude=solar_permit.get("longitude"),
+                        latitude=solar_permit.get("latitude") or lat,
+                        longitude=solar_permit.get("longitude") or lon,
                         year_built=timeline.year_built,
                         building_age=timeline.building_age,
+                        year_built_status=timeline.year_built_status,
+                        roof_history_status=timeline.roof_history_status,
                         building_actual_area=timeline.building_actual_area,
                         estimated_roof_squares=timeline.estimated_roof_squares,
                         owner_name=timeline.owner_name,
                         dor_desc=timeline.dor_desc,
                         assessed_value=timeline.assessed_value,
+                        storm_event_type=storm_event_type,
+                        storm_distance_miles=storm_distance_miles,
+                        storm_event_date=storm_event_date,
+                        storm_age_days=storm_age_days,
+                        storm_magnitude=storm_mag_str,
                     )
                 )
 
@@ -637,5 +730,4 @@ class PropertyOpportunityEngine:
         self,
         timelines: Dict[str, PropertyTimeline],
     ) -> List[PropertySignal]:
-        """Backward compatibility alias for generate_signals."""
         return self.generate_signals(timelines)

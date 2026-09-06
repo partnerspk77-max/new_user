@@ -60,6 +60,16 @@ class PropertyTimeline:
         return None
 
     @property
+    def year_built_status(self) -> str:
+        """Explicitly tracks whether year built is verified from official records or unrecorded."""
+        return "VERIFIED" if (self.year_built is not None and self.year_built > 0) else "UNRECORDED"
+
+    @property
+    def roof_history_status(self) -> str:
+        """Epistemic status: distinguishes verified prior permits from absence of permits in window."""
+        return "VERIFIED_PRIOR_PERMIT" if self.last_roof_permit_date else "NO_PERMIT_IN_DATASET_WINDOW"
+
+    @property
     def estimated_roof_squares(self) -> Optional[float]:
         area = self.building_actual_area or self.building_heated_area
         if area and area > 0:
@@ -69,6 +79,8 @@ class PropertyTimeline:
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["building_age"] = self.building_age
+        d["year_built_status"] = self.year_built_status
+        d["roof_history_status"] = self.roof_history_status
         d["estimated_roof_squares"] = self.estimated_roof_squares
         return d
 
@@ -109,11 +121,19 @@ class PropertySignal:
     # Physical Parcel Enrichment Attributes
     year_built: Optional[int] = None
     building_age: Optional[int] = None
+    year_built_status: str = "UNRECORDED"  # 'VERIFIED' or 'UNRECORDED'
+    roof_history_status: str = "NO_PERMIT_IN_DATASET_WINDOW"  # 'VERIFIED_PRIOR_PERMIT' or 'NO_PERMIT_IN_DATASET_WINDOW'
     building_actual_area: Optional[float] = None
     estimated_roof_squares: Optional[float] = None
     owner_name: Optional[str] = None
     dor_desc: Optional[str] = None
     assessed_value: Optional[float] = None
+    # NOAA Storm Proximity Attributes
+    storm_event_type: Optional[str] = None
+    storm_distance_miles: Optional[float] = None
+    storm_event_date: Optional[str] = None
+    storm_age_days: Optional[float] = None
+    storm_magnitude: Optional[str] = None
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

@@ -1,7 +1,7 @@
 """
 Storage repository for Miami-Dade Property Graph and Stateful Signals.
-Implements stateful persistence (preserving first_detected_at, lifecycle states)
-and provides historical tracking without destructive truncations.
+Implements stateful persistence (preserving first_detected_at, lifecycle states),
+NOAA storm correlation fields, and epistemic verification tracking.
 """
 
 from __future__ import annotations
@@ -82,11 +82,18 @@ CREATE TABLE IF NOT EXISTS property_signals (
     longitude REAL,
     year_built INTEGER,
     building_age INTEGER,
+    year_built_status TEXT NOT NULL DEFAULT 'UNRECORDED',
+    roof_history_status TEXT NOT NULL DEFAULT 'NO_PERMIT_IN_DATASET_WINDOW',
     building_actual_area REAL,
     estimated_roof_squares REAL,
     owner_name TEXT,
     dor_desc TEXT,
     assessed_value REAL,
+    storm_event_type TEXT,
+    storm_distance_miles REAL,
+    storm_event_date TEXT,
+    storm_age_days REAL,
+    storm_magnitude TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -97,6 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_sig_type ON property_signals (signal_type);
 CREATE INDEX IF NOT EXISTS idx_sig_audience ON property_signals (target_audience);
 CREATE INDEX IF NOT EXISTS idx_sig_score ON property_signals (evidence_score DESC);
 CREATE INDEX IF NOT EXISTS idx_sig_age ON property_signals (building_age);
+CREATE INDEX IF NOT EXISTS idx_sig_storm ON property_signals (storm_distance_miles);
 
 -- Backward compatibility view for legacy commercial_opportunities queries
 CREATE VIEW IF NOT EXISTS commercial_opportunities AS
@@ -120,11 +128,16 @@ SELECT
     longitude,
     year_built,
     building_age,
+    year_built_status,
+    roof_history_status,
     building_actual_area,
     estimated_roof_squares,
     owner_name,
     dor_desc,
     assessed_value,
+    storm_event_type,
+    storm_distance_miles,
+    storm_event_date,
     created_at
 FROM property_signals
 WHERE status = 'ACTIVE';
@@ -143,7 +156,7 @@ class OpportunityStorage:
         with conn:
             cursor = conn.cursor()
 
-            # Ensure property_timelines columns
+            # Check existing columns in property_timelines
             cursor.execute("PRAGMA table_info(property_timelines)")
             pt_cols = {r["name"] for r in cursor.fetchall()}
             if pt_cols:
@@ -159,24 +172,31 @@ class OpportunityStorage:
                     if col_name not in pt_cols:
                         cursor.execute(f"ALTER TABLE property_timelines ADD COLUMN {col_name} {col_type}")
 
-            # Ensure property_signals columns
+            # Check existing columns in property_signals
             cursor.execute("PRAGMA table_info(property_signals)")
             sig_cols = {r["name"] for r in cursor.fetchall()}
             if sig_cols:
                 signal_additions = [
                     ("year_built", "INTEGER"),
                     ("building_age", "INTEGER"),
+                    ("year_built_status", "TEXT DEFAULT 'UNRECORDED'"),
+                    ("roof_history_status", "TEXT DEFAULT 'NO_PERMIT_IN_DATASET_WINDOW'"),
                     ("building_actual_area", "REAL"),
                     ("estimated_roof_squares", "REAL"),
                     ("owner_name", "TEXT"),
                     ("dor_desc", "TEXT"),
                     ("assessed_value", "REAL"),
+                    ("storm_event_type", "TEXT"),
+                    ("storm_distance_miles", "REAL"),
+                    ("storm_event_date", "TEXT"),
+                    ("storm_age_days", "REAL"),
+                    ("storm_magnitude", "TEXT"),
                 ]
                 for col_name, col_type in signal_additions:
                     if col_name not in sig_cols:
                         cursor.execute(f"ALTER TABLE property_signals ADD COLUMN {col_name} {col_type}")
 
-            # Check if commercial_opportunities is a table or view and drop cleanly to recreate
+            # Recreate view cleanly
             cursor.execute("SELECT type FROM sqlite_master WHERE name = 'commercial_opportunities'")
             row = cursor.fetchone()
             if row:
@@ -260,13 +280,6 @@ class OpportunityStorage:
         return len(records)
 
     def save_signals(self, signals: List[PropertySignal]) -> int:
-        """
-        Statefully persists commercial signals.
-        Never drops signal history:
-        - Inserts newly discovered signals (first_detected_at = now)
-        - Updates active signals (last_seen_at = now, status = ACTIVE)
-        - Transitions disappeared signals (status = RESOLVED)
-        """
         conn = self.db.get_connection()
         now_utc = datetime.now(timezone.utc).isoformat()
         cursor = conn.cursor()
@@ -309,18 +322,24 @@ class OpportunityStorage:
                     s.longitude,
                     s.year_built,
                     s.building_age,
+                    s.year_built_status,
+                    s.roof_history_status,
                     s.building_actual_area,
                     s.estimated_roof_squares,
                     s.owner_name,
                     s.dor_desc,
                     s.assessed_value,
+                    s.storm_event_type,
+                    s.storm_distance_miles,
+                    s.storm_event_date,
+                    s.storm_age_days,
+                    s.storm_magnitude,
                     first_seen,
                     now_utc,
                 )
             )
 
         with conn:
-            # 1. Upsert all active incoming signals
             conn.executemany(
                 """
                 INSERT INTO property_signals (
@@ -329,10 +348,11 @@ class OpportunityStorage:
                     evidence_breakdown_json, corroborating_signals_json, unverified_assumptions_json,
                     freshness_tier, age_hours, age_days, contractor_present, contractor_name,
                     trigger_trade, trigger_event, recommended_action, residential_commercial,
-                    latitude, longitude, year_built, building_age, building_actual_area,
-                    estimated_roof_squares, owner_name, dor_desc, assessed_value,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latitude, longitude, year_built, building_age, year_built_status,
+                    roof_history_status, building_actual_area, estimated_roof_squares,
+                    owner_name, dor_desc, assessed_value, storm_event_type, storm_distance_miles,
+                    storm_event_date, storm_age_days, storm_magnitude, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(signal_id) DO UPDATE SET
                     status = excluded.status,
                     last_seen_at = excluded.last_seen_at,
@@ -349,17 +369,24 @@ class OpportunityStorage:
                     recommended_action = excluded.recommended_action,
                     year_built = excluded.year_built,
                     building_age = excluded.building_age,
+                    year_built_status = excluded.year_built_status,
+                    roof_history_status = excluded.roof_history_status,
                     building_actual_area = excluded.building_actual_area,
                     estimated_roof_squares = excluded.estimated_roof_squares,
                     owner_name = excluded.owner_name,
                     dor_desc = excluded.dor_desc,
                     assessed_value = excluded.assessed_value,
+                    storm_event_type = excluded.storm_event_type,
+                    storm_distance_miles = excluded.storm_distance_miles,
+                    storm_event_date = excluded.storm_event_date,
+                    storm_age_days = excluded.storm_age_days,
+                    storm_magnitude = excluded.storm_magnitude,
                     updated_at = excluded.updated_at
                 """,
                 upsert_records,
             )
 
-            # 2. Transition signals that were active but are no longer observed to RESOLVED
+            # Transition signals that were active but are no longer observed to RESOLVED
             all_active_cursor = conn.cursor()
             all_active_cursor.execute("SELECT signal_id FROM property_signals WHERE status = 'ACTIVE'")
             current_active_ids = {r["signal_id"] for r in all_active_cursor.fetchall()}
@@ -381,7 +408,6 @@ class OpportunityStorage:
         return len(upsert_records)
 
     def save_opportunities(self, opportunities: List[PropertySignal]) -> int:
-        """Backward compatibility alias."""
         return self.save_signals(opportunities)
 
     def get_signals(
@@ -391,7 +417,6 @@ class OpportunityStorage:
         status: str = SignalStatus.ACTIVE,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Retrieves ranked signals with deserialized evidence payloads."""
         conn = self.db.get_connection()
         cursor = conn.cursor()
 
@@ -434,11 +459,9 @@ class OpportunityStorage:
         opportunity_type: Optional[str] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Backward compatibility alias."""
         return self.get_signals(audience=audience, signal_type=opportunity_type, limit=limit)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Returns statistical counts for property graph and signals."""
         conn = self.db.get_connection()
         cursor = conn.cursor()
 
@@ -481,7 +504,7 @@ class OpportunityStorage:
 
         return {
             "total_properties": total_properties,
-            "total_opportunities": active_signals,  # Alias
+            "total_opportunities": active_signals,
             "active_signals": active_signals,
             "resolved_signals": resolved_signals,
             "by_audience": by_audience,
@@ -489,13 +512,14 @@ class OpportunityStorage:
             "by_freshness": by_freshness,
         }
 
+    get_metrics = get_stats
+
     def export_signals(
         self,
         csv_roofers: Path,
         csv_suppliers: Path,
         json_all: Path,
     ) -> Dict[str, int]:
-        """Exports segmented signal feeds with parsed evidence payloads."""
         conn = self.db.get_connection()
         cursor = conn.cursor()
 
@@ -516,7 +540,7 @@ class OpportunityStorage:
         with open(json_all, "w", encoding="utf-8") as f:
             json.dump(all_rows, f, indent=2)
 
-        # Helper for CSV export to keep evidence readable
+        # Helper for CSV export
         def write_csv(p: Path, rows: List[Dict[str, Any]]):
             if not rows:
                 return
@@ -541,8 +565,4 @@ class OpportunityStorage:
         csv_suppliers: Path,
         json_all: Path,
     ) -> Dict[str, int]:
-        """Backward compatibility alias."""
         return self.export_signals(csv_roofers, csv_suppliers, json_all)
-
-    # Alias for get_stats
-    get_metrics = get_stats

@@ -393,3 +393,50 @@ class TestParcelEnrichedOpportunityScoring:
 
         # Vintage score must be significantly higher than new construction score
         assert vintage_sig.evidence_score > new_sig.evidence_score
+
+    def test_storm_evidence_and_epistemic_status(self, opp_db):
+        from src.weather.correlator import StormCorrelator
+        from src.weather.models import StormEvent
+
+        storm = StormEvent(
+            event_id="STM-TEST01",
+            event_type="HAIL",
+            magnitude=1.75,
+            unit="INCHES",
+            event_time="2026-08-25T14:00:00Z",
+            latitude=25.7600,
+            longitude=-80.2000,
+        )
+        correlator = StormCorrelator([storm], max_distance_miles=10.0)
+        engine = PropertyOpportunityEngine(opp_db, storm_correlator=correlator)
+
+        # Property at (25.7620, -80.2050) ~ 0.3 miles from severe hail
+        timeline = PropertyTimeline(
+            folio="FOLIO-STORM-HAIL",
+            address="500 SW 1 ST",
+            total_permits=1,
+            trades=["MECH"],
+            active_trades=["MECH"],
+            roof_permits_count=0,
+            has_active_roof_permit=False,
+            has_active_non_roof_permit=True,
+            non_roof_renovation_types=["HVAC_AC_REPLACEMENT"],
+            year_built=1978,
+            building_actual_area=2200.0,
+            permits=[{"permit_number": "M-STORM", "permit_type": "MECH", "status": "A", "issued_at": "2026-09-01T00:00:00Z", "latitude": 25.7620, "longitude": -80.2050}]
+        )
+
+        signals = engine.generate_signals({"FOLIO-STORM-HAIL": timeline})
+        assert len(signals) == 1
+        sig = signals[0]
+
+        # Epistemic status checks
+        assert sig.year_built_status == "VERIFIED"
+        assert sig.roof_history_status == "NO_PERMIT_IN_DATASET_WINDOW"
+        assert sig.year_built == 1978
+
+        # Storm correlation checks
+        assert sig.storm_event_type == "HAIL"
+        assert sig.storm_distance_miles is not None and sig.storm_distance_miles <= 1.0
+        assert sig.evidence_breakdown["storm_evidence"] >= 15.0
+        assert "Recent severe HAIL" in " ".join(sig.corroborating_signals)
