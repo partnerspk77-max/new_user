@@ -103,9 +103,9 @@ jobs:
           echo "Executing: $CMD"
           $CMD
 
-      # 2. Incremental Sync Command (Default on scheduled runs or manual sync)
+      # 2. Incremental Sync Command (Default on push, scheduled runs, or manual sync)
       - name: Execute Incremental Synchronization
-        if: "${{ github.event_name == 'schedule' || github.event.inputs.command == 'sync' || github.event.inputs.command == '' }}"
+        if: "${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.command == 'sync' || github.event.inputs.command == '' }}"
         run: |
           python -m src.cli sync --overlap-minutes ${{ github.event.inputs.overlap_minutes || '120' }}
 
