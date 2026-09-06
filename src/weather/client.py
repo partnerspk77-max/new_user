@@ -11,6 +11,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
+from src.client.exceptions import WeatherFetchError
 from src.logger import logger
 from src.weather.models import StormEvent
 
@@ -104,5 +105,9 @@ class NOAAStormClient:
             return events
 
         except Exception as exc:
-            logger.error(f"Failed to fetch NOAA/NWS storm reports: {exc}")
-            return []
+            # Surface the failure instead of masquerading as "no storms":
+            # a silent empty list would quietly degrade storm evidence everywhere.
+            raise WeatherFetchError(
+                f"Failed to fetch NOAA/NWS storm reports from {self.base_url}: {exc}. "
+                f"Check network connectivity; storm enrichment can be re-run safely (results are cached)."
+            ) from exc

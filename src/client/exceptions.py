@@ -37,6 +37,16 @@ class ValidationError(PipelineError):
     pass
 
 
+class ParcelFetchError(PipelineError):
+    """Raised when a parcel enrichment batch fails (network, protocol, or ArcGIS error)."""
+    pass
+
+
+class WeatherFetchError(PipelineError):
+    """Raised when NOAA/NWS storm report ingestion fails (network or protocol error)."""
+    pass
+
+
 class StorageError(PipelineError):
     """Raised when database or file storage encounters a failure."""
     pass

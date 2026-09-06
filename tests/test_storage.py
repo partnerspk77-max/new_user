@@ -3,6 +3,7 @@ Unit tests for storage engines: RawStore, PermitStore, and StateStore.
 Tests deterministic upserts, deduplication, update preservation, and checkpointing.
 """
 
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 from src.pipeline.normalizer import PermitNormalizer
@@ -104,3 +105,35 @@ class TestStateStore:
         assert state["total_ingested"] == 100
         assert state["status"] == "completed"
         assert state["metadata"]["source"] == "test"
+
+
+class TestDatabaseUrlValidationRegression:
+    """Regression: stray DATABASE_URL values (e.g. file:/... ) silently created bogus DB files."""
+
+    def test_unsupported_scheme_raises_actionable_error(self):
+        from src.client.exceptions import StorageError
+        from src.storage.database import Database
+
+        for bad in ("file:/tmp/custom.db", "postgresql://u:p@db/x", "mysql://x/y"):
+            with pytest.raises(StorageError):
+                Database(bad)
+
+    def test_supported_url_forms(self):
+        from src.storage.database import Database
+
+        assert Database._parse_sqlite_path("sqlite:///data/permits.db") == "data/permits.db"
+        assert Database._parse_sqlite_path("sqlite:////abs/path.db") == "/abs/path.db"
+        assert Database._parse_sqlite_path("sqlite://:memory:") == ":memory:"
+        assert Database._parse_sqlite_path(":memory:") == ":memory:"
+
+
+class TestCheckpointPreservesTotalsRegression:
+    """Regression: a failed run overwrote lifetime total_ingested with 0."""
+
+    def test_failed_checkpoint_does_not_wipe_total_ingested(self, state_store):
+        state_store.update_checkpoint(total_ingested=1234, status="completed")
+        state_store.update_checkpoint(status="failed")  # no total passed
+
+        state = state_store.get_state("miami_dade_arcgis")
+        assert state["total_ingested"] == 1234
+        assert state["status"] == "failed"

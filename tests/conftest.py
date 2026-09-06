@@ -3,10 +3,27 @@ Shared fixtures and test helpers.
 """
 
 import pytest
+from src.config import config
 from src.storage.database import Database
 from src.storage.permit_store import PermitStore
 from src.storage.raw_store import RawStore
 from src.storage.state_store import StateStore
+
+
+@pytest.fixture(autouse=True)
+def hermetic_environment(tmp_path, monkeypatch):
+    """
+    Forces every test to run against an isolated throwaway SQLite database.
+
+    Without this, any stray DATABASE_URL in the developer/CI environment
+    (or in a parent-directory .env) silently redirects test traffic to a
+    real database. PipelineConfig is a frozen dataclass, hence the
+    object.__setattr__ patching of the already-instantiated singleton.
+    """
+    test_db_url = f"sqlite:///{tmp_path}/hermetic_test.db"
+    monkeypatch.setenv("DATABASE_URL", test_db_url)
+    object.__setattr__(config, "database_url", test_db_url)
+    yield
 
 
 @pytest.fixture

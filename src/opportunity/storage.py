@@ -20,6 +20,21 @@ from src.opportunity.models import (
 )
 from src.storage.database import Database
 
+# Canonical column order for signal/feed CSV exports when there are no rows yet.
+SIGNAL_EXPORT_COLUMNS = [
+    "signal_id", "folio", "address", "signal_type", "target_audience", "status",
+    "first_detected_at", "last_seen_at", "evidence_score", "evidence_breakdown",
+    "corroborating_signals", "unverified_assumptions", "freshness_tier",
+    "age_hours", "age_days", "contractor_present", "contractor_name",
+    "trigger_trade", "trigger_event", "recommended_action",
+    "residential_commercial", "latitude", "longitude", "year_built",
+    "building_age", "year_built_status", "roof_history_status",
+    "building_actual_area", "estimated_roof_squares", "owner_name", "dor_desc",
+    "assessed_value", "storm_event_type", "storm_distance_miles",
+    "storm_event_date", "storm_age_days", "storm_magnitude",
+    "created_at", "updated_at",
+]
+
 
 OPPORTUNITY_SCHEMA_SQL = """
 -- 1. Property Graph Timelines Table
@@ -429,8 +444,8 @@ class OpportunityStorage:
         query = "SELECT * FROM property_signals WHERE status = ?"
         params: List[Any] = [status]
 
-        if audience:
-            aud_upper = audience.upper()
+        if audience and str(audience).strip().lower() not in ("all", "any", "*"):
+            aud_upper = str(audience).upper()
             if "ROOF" in aud_upper:
                 query += " AND target_audience = 'ROOFING_CONTRACTOR'"
             elif "SUPPLIER" in aud_upper or "DISTRIBUTOR" in aud_upper:
@@ -546,13 +561,13 @@ class OpportunityStorage:
         with open(json_all, "w", encoding="utf-8") as f:
             json.dump(all_rows, f, indent=2)
 
-        # Helper for CSV export
+        # Helper for CSV export — always writes a header row so downstream
+        # consumers (Excel, BI tools) never receive empty/missing feed files.
         def write_csv(p: Path, rows: List[Dict[str, Any]]):
-            if not rows:
-                return
             p.parent.mkdir(parents=True, exist_ok=True)
+            fieldnames = list(rows[0].keys()) if rows else SIGNAL_EXPORT_COLUMNS
             with open(p, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)
 

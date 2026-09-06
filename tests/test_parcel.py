@@ -9,6 +9,7 @@ Tests:
 import pytest
 from unittest.mock import MagicMock, patch
 
+from src.client.exceptions import ParcelFetchError
 from src.client.parcel_client import ParcelClient
 from src.enrichment.models import PropertyParcel
 from src.enrichment.storage import ParcelStorage
@@ -109,12 +110,27 @@ class TestParcelClient:
         assert parcels[0].estimated_roof_squares == 24.0
 
     def test_fetch_parcels_batch_error_handling(self):
+        """Hard network failures raise ParcelFetchError instead of silently returning []."""
         mock_session = MagicMock()
         mock_session.post.side_effect = Exception("ArcGIS connection timeout")
 
         client = ParcelClient(session=mock_session)
-        parcels = client.fetch_parcels_batch(["30-1001-000-0010"])
-        assert parcels == []
+        with pytest.raises(ParcelFetchError):
+            client.fetch_parcels_batch(["30-1001-000-0010"])
+
+    def test_fetch_all_parcels_skips_failed_batch_and_reports(self):
+        """A failing batch must not abort the run, and must not count as 'fetched'."""
+        client = ParcelClient(batch_size=2, request_delay=0.0)
+
+        with patch.object(client, "fetch_parcels_batch") as mock_batch:
+            mock_batch.side_effect = [
+                [PropertyParcel(folio="F01"), PropertyParcel(folio="F02")],
+                ParcelFetchError("network down"),  # middle batch fails
+                [PropertyParcel(folio="F05")],
+            ]
+            results = client.fetch_all_parcels(["F01", "F02", "F03", "F04", "F05"])
+
+        assert len(results) == 3  # failed batch of 2 is skipped, not silently included
 
     def test_fetch_all_parcels_chunking(self):
         client = ParcelClient(batch_size=2, request_delay=0.0)

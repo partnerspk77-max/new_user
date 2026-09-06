@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    # Run daily at 06:00 UTC
+    # Run daily at 06:00 UTC (02:00 ET) — full end-to-end pipeline
     - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
@@ -16,6 +16,7 @@ on:
         type: choice
         options:
           - sync
+          - run-all
           - backfill
           - inspect
           - export-json
@@ -35,6 +36,11 @@ on:
         description: 'Overlap window in minutes for incremental sync (default: 120)'
         required: false
         default: '120'
+      skip_enrichment:
+        description: 'Skip parcel/storm network enrichment (faster runs)'
+        required: false
+        type: boolean
+        default: false
       commit_data:
         description: 'Commit data/permits.json back to repository'
         required: false
@@ -44,10 +50,17 @@ on:
 permissions:
   contents: write
 
+# Prevent a manual dispatch from racing the 06:00 UTC scheduled sync
+# over the same SQLite cache key.
+concurrency:
+  group: permits-pipeline-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   ingest:
     name: Run Permit Ingestion Pipeline
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     env:
       # Secrets configured in repository Settings -> Secrets and variables -> Actions
@@ -56,9 +69,9 @@ jobs:
       ARCGIS_API_TOKEN: ${{ secrets.ARCGIS_API_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL || 'sqlite:///data/permits.db' }}
       PERMIT_PAGE_SIZE: ${{ vars.PERMIT_PAGE_SIZE || '1000' }}
-      PERMIT_REQUEST_TIMEOUT: ${{ vars.PERMIT_REQUEST_TIMEOUT || '30' }}
+      PERMIT_REQUEST_TIMEOUT: ${{ vars.PERMIT_REQUEST_TIMEOUT || '60' }}
       PERMIT_MAX_RETRIES: ${{ vars.PERMIT_MAX_RETRIES || '5' }}
-      PERMIT_INCREMENTAL_OVERLAP_MINUTES: ${{ inputs.overlap_minutes || vars.PERMIT_INCREMENTAL_OVERLAP_MINUTES || '120' }}
+      PERMIT_INCREMENTAL_OVERLAP_MINUTES: ${{ inputs.overlap_minutes || vars.PERMIT_INCREMENTAL_OVERLAP_MINUTES || '360' }}
       LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
 
     steps:
@@ -81,15 +94,38 @@ jobs:
           pytest -v tests/
 
       - name: Restore SQLite Database Cache
-        if: "!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite')"
+        if: ${{ !env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite') }}
         uses: actions/cache/restore@v4
         with:
-          path: data/permits.db
+          path: |
+            data/permits.db
+            data/permits.db-wal
+            data/permits.db-shm
           key: permits-db-${{ github.ref_name }}
           restore-keys: |
             permits-db-
 
-      # 1. Backfill Command
+      # 1. One-shot End-to-End Run (manual dispatch choice)
+      - name: Execute End-to-End Pipeline (run-all)
+        if: "${{ github.event.inputs.command == 'run-all' }}"
+        run: |
+          CMD="python -m src.cli run-all"
+          if [ -n "${{ github.event.inputs.days }}" ] && [ "${{ github.event.inputs.command }}" = "run-all" ]; then
+            CMD="$CMD --days ${{ github.event.inputs.days }}"
+          fi
+          if [ -n "${{ github.event.inputs.start_date }}" ]; then
+            CMD="$CMD --start-date ${{ github.event.inputs.start_date }}"
+          fi
+          if [ -n "${{ github.event.inputs.end_date }}" ]; then
+            CMD="$CMD --end-date ${{ github.event.inputs.end_date }}"
+          fi
+          if [ "${{ github.event.inputs.skip_enrichment }}" = "true" ]; then
+            CMD="$CMD --skip-enrichment"
+          fi
+          echo "Executing: $CMD"
+          $CMD
+
+      # 2. Historical Backfill Command
       - name: Execute Historical Backfill
         if: "${{ github.event.inputs.command == 'backfill' }}"
         run: |
@@ -103,45 +139,60 @@ jobs:
           echo "Executing: $CMD"
           $CMD
 
-      # 2. Incremental Sync Command (Default on push, scheduled runs, or manual sync)
+      # 3. Incremental Sync Command (Default on push and scheduled runs)
       - name: Execute Incremental Synchronization
         if: "${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.command == 'sync' || github.event.inputs.command == '' }}"
         run: |
-          python -m src.cli sync --overlap-minutes ${{ github.event.inputs.overlap_minutes || '120' }}
+          python -m src.cli sync --overlap-minutes ${{ github.event.inputs.overlap_minutes || '360' }}
 
-      # 3. Discovery Tooling Report
+      # 4. Discovery Tooling Report
       - name: Generate Discovery & Statistics Report
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           python -m src.cli inspect
 
-      # 4. JSON Dataset Export
+      # 5. JSON Dataset Export
       - name: Export JSON Dataset
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           python -m src.cli export-json --output data/permits.json
 
-      # 5. Save SQLite Database Cache for Subsequent Runs
+      # 6. Checkpoint WAL into the main DB file so cached state is complete
+      - name: Checkpoint SQLite WAL
+        if: ${{ !cancelled() && (!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite')) }}
+        run: |
+          python - <<'PY'
+          import sqlite3
+          conn = sqlite3.connect("data/permits.db")
+          conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+          conn.close()
+          print("WAL checkpoint complete.")
+          PY
+
+      # 7. Save SQLite Database Cache for Subsequent Runs
       - name: Save SQLite Database Cache
-        if: "always() && (!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite'))"
+        if: ${{ !cancelled() && (!env.DATABASE_URL || startsWith(env.DATABASE_URL, 'sqlite')) }}
         uses: actions/cache/save@v4
         with:
-          path: data/permits.db
+          path: |
+            data/permits.db
+            data/permits.db-wal
+            data/permits.db-shm
           key: permits-db-${{ github.ref_name }}-${{ github.run_id }}
 
-      # 6. Optional Git Commit of Data Export
+      # 8. Optional Git Commit of Data Export
       - name: Commit Updated permits.json
-        if: "${{ github.event.inputs.commit_data == true }}"
+        if: "${{ github.event.inputs.commit_data == 'true' }}"
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
           git add data/permits.json
           git diff-index --quiet HEAD || (git commit -m "chore(data): automated permit sync [skip ci]" && git push)
 
-      # 7. Upload Artifacts (Database & JSON)
+      # 9. Upload Artifacts (Database & JSON)
       - name: Archive Permit Dataset Artifacts
         uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: permits-dataset
           path: |
@@ -149,10 +200,25 @@ jobs:
             data/permits.json
           retention-days: 30
 
-      # 8. Upload Execution Logs
+      # 10. Upload Client-Facing Lead Feeds (the actual deliverables)
+      - name: Archive Lead Feeds
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: lead-feeds
+          path: |
+            data/feed_permitted_projects_suppliers.csv
+            data/feed_pre_permit_roof_opportunities.csv
+            data/feed_contractor_market_intelligence.csv
+            data/property_signals_roofers.csv
+            data/property_signals_suppliers.csv
+            data/property_signals.json
+          retention-days: 30
+
+      # 11. Upload Execution Logs
       - name: Archive Execution Logs
         uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: execution-logs
           path: |

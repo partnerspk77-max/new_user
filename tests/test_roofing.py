@@ -255,3 +255,18 @@ class TestRoofingCLI:
         from src.roofing.cli import main
         with patch("sys.argv", ["cli.py", "roofing-stats"]):
             assert main() == 0
+
+
+class TestAuditEmptyDatabaseRegression:
+    """Regression: audit-roofing crashed with ZeroDivisionError on an empty database."""
+
+    def test_compute_audit_metrics_empty_records_returns_zeros(self, test_db):
+        from src.roofing.audit import CommercialAuditEngine
+
+        engine = CommercialAuditEngine(test_db)
+        metrics = engine.compute_audit_metrics([])
+
+        assert metrics["total_audited"] == 0
+        assert metrics["classification_precision"] == 0.0
+        assert metrics["commercial_segment_breakdown"] == {}
+        assert metrics["freshness_distribution"] == {}

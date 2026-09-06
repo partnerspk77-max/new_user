@@ -91,10 +91,14 @@ class BackfillService:
                     logger.info(f"Backfill reached end of dataset at page {page_number}, offset {offset}.")
                     break
 
-                # Protect against infinite loop: verify new records are being returned
+                # Protect against infinite loop: if the FIRST record of this page was
+                # already seen on a previous page, the server is ignoring resultOffset.
                 first_obj_id = (features[0].get("attributes") or {}).get("OBJECTID")
-                if first_obj_id in seen_object_ids and len(features) == 1:
-                    logger.warning(f"Infinite loop protection triggered at offset {offset}. Terminating.")
+                if first_obj_id is not None and first_obj_id in seen_object_ids:
+                    logger.warning(
+                        f"Infinite loop protection triggered at offset {offset}: "
+                        f"server re-returned OBJECTID {first_obj_id}. Terminating pagination."
+                    )
                     break
                 for f in features:
                     oid = (f.get("attributes") or {}).get("OBJECTID")

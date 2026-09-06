@@ -32,27 +32,30 @@ class PermitStore:
         conn = self.db.get_connection()
         now_utc = datetime.now(timezone.utc).isoformat()
 
-        # Gather existing records in one query to classify new vs updated vs duplicate
+        # Gather existing records to classify new vs updated vs duplicate.
+        # Chunked in pairs of <=400 to stay under SQLITE_MAX_VARIABLE_NUMBER=999
+        # on older SQLite builds (2 params per permit x page_size=1000 = 2000 vars).
         source_pairs = [(p.source, p.source_object_id) for p in permits]
-        placeholders = ",".join("(?, ?)" for _ in source_pairs)
-        flat_params: List[Any] = []
-        for s, oid in source_pairs:
-            flat_params.extend([s, oid])
-
+        existing_rows: Dict[Tuple[str, int], Dict[str, Any]] = {}
         cursor = conn.cursor()
-        cursor.execute(
-            f"""
-            SELECT source, source_object_id, status, contractor_name, contractor_number,
-                   last_inspection_at, completion_at, last_approval_at, renewal_at, comment
-            FROM permits
-            WHERE (source, source_object_id) IN (VALUES {placeholders})
-            """,
-            flat_params,
-        )
-        existing_rows = {
-            (r["source"], r["source_object_id"]): dict(r)
-            for r in cursor.fetchall()
-        }
+        CHUNK_SIZE = 400
+        for i in range(0, len(source_pairs), CHUNK_SIZE):
+            chunk = source_pairs[i : i + CHUNK_SIZE]
+            placeholders = ",".join("(?, ?)" for _ in chunk)
+            flat_params: List[Any] = []
+            for s, oid in chunk:
+                flat_params.extend([s, oid])
+            cursor.execute(
+                f"""
+                SELECT source, source_object_id, status, contractor_name, contractor_number,
+                       last_inspection_at, completion_at, last_approval_at, renewal_at, comment
+                FROM permits
+                WHERE (source, source_object_id) IN (VALUES {placeholders})
+                """,
+                flat_params,
+            )
+            for r in cursor.fetchall():
+                existing_rows[(r["source"], r["source_object_id"])] = dict(r)
 
         new_count = 0
         updated_count = 0

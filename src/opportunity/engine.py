@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.enrichment.models import PropertyParcel
+from src.logger import logger
 from src.opportunity.models import (
     PropertySignal,
     PropertyTimeline,
@@ -41,8 +42,8 @@ class PropertyOpportunityEngine:
         try:
             from src.roofing.storage import RoofingStorage
             RoofingStorage(self.db)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Roofing history enrichment unavailable (classification may be incomplete): {exc}")
 
     def _get_storm_correlator(self) -> Optional[StormCorrelator]:
         if self.storm_correlator is not None:
@@ -54,8 +55,8 @@ class PropertyOpportunityEngine:
             if events:
                 self.storm_correlator = StormCorrelator(events)
                 return self.storm_correlator
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Storm correlation unavailable (signals will lack storm evidence): {exc}")
         return None
 
     def _calculate_freshness(self, issued_at: Optional[str]) -> Tuple[Optional[float], Optional[float], str]:

@@ -18,7 +18,7 @@ import json
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import sqlite3
 
 from src.storage.database import Database
@@ -238,6 +238,27 @@ class CommercialAuditEngine:
     def compute_audit_metrics(self, audited_records: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Calculates commercial precision and conversion statistics."""
         total = len(audited_records)
+
+        if total == 0:
+            # Graceful empty-database handling: report zeros instead of crashing.
+            return {
+                "total_audited": 0,
+                "true_roofing_count": 0,
+                "true_roofing_percentage": 0.0,
+                "classification_precision": 0.0,
+                "contractor_present_count": 0,
+                "contractor_present_percentage": 0.0,
+                "owner_builder_count": 0,
+                "owner_builder_percentage": 0.0,
+                "supplier_actionable_count": 0,
+                "supplier_actionable_percentage": 0.0,
+                "roofer_unassigned_count": 0,
+                "roofer_unassigned_percentage": 0.0,
+                "fresh_less_than_3_days_count": 0,
+                "fresh_less_than_3_days_percentage": 0.0,
+                "commercial_segment_breakdown": {},
+                "freshness_distribution": {},
+            }
 
         true_roofing_count = sum(1 for r in audited_records if r["is_true_roofing"])
         contractor_present_count = sum(1 for r in audited_records if r["contractor_present"])

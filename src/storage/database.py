@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from src.client.exceptions import StorageError
 from src.config import config
 from src.logger import logger
 
@@ -113,12 +114,40 @@ class Database:
 
     @staticmethod
     def _parse_sqlite_path(url: str) -> str:
-        """Parses sqlite:///path/to/db or :memory: into filesystem path."""
+        """
+        Parses supported DATABASE_URL values into a filesystem path.
+
+        Supported formats:
+          - sqlite:///relative/path.db   -> relative/path.db
+          - sqlite:////absolute/path.db  -> /absolute/path.db
+          - sqlite://:memory: / :memory: -> :memory:
+          - bare filesystem path         -> used as-is (with a warning)
+        Anything else (postgres://, mysql://, file://) raises StorageError with
+        an actionable message instead of silently writing to a bogus file.
+        """
         if url.startswith("sqlite:///"):
-            path_str = url.replace("sqlite:///", "")
-            return path_str
+            path_str = url.replace("sqlite:///", "", 1)
+            # sqlite:////abs/path keeps a leading slash after the first strip,
+            # so a 4-slash form yields an absolute path.
+            return path_str if url.startswith("sqlite:////") else path_str
         elif url == ":memory:" or url.startswith("sqlite://:memory:"):
             return ":memory:"
+
+        lowered = url.lower()
+        unsupported_prefixes = ("postgres://", "postgresql://", "mysql://", "file:", "mssql://", "oracle://")
+        if lowered.startswith(unsupported_prefixes):
+            raise StorageError(
+                f"Unsupported DATABASE_URL: '{url}'. "
+                f"This pipeline's SQLite driver supports: sqlite:///data/permits.db, "
+                f"sqlite:///:memory:, or a plain filesystem path. "
+                f"Fix the DATABASE_URL environment variable (check .env files in this and parent directories)."
+            )
+        if "://" in url:
+            raise StorageError(
+                f"Unrecognized DATABASE_URL scheme in '{url}'. "
+                f"Expected 'sqlite:///path/to.db', ':memory:', or a plain filesystem path."
+            )
+        logger.warning(f"DATABASE_URL '{url}' is a bare filesystem path; treating it as SQLite database location.")
         return url
 
     def get_connection(self) -> sqlite3.Connection:

@@ -156,7 +156,7 @@ class PipelineLogger:
     def warning(self, message: str, **context: Any) -> None:
         self._logger.warning(message, extra={"context": context} if context else None)
 
-    def error(self, message: str, exc_info: bool = True, **context: Any) -> None:
+    def error(self, message: str, exc_info: bool = False, **context: Any) -> None:
         self._logger.error(message, exc_info=exc_info, extra={"context": context} if context else None)
 
 

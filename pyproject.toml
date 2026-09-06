@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miami-dade-lead-pipeline"
+version = "1.0.0"
+description = "End-to-end lead generation automation for Miami-Dade County building permits: ingestion, roofing classification, parcel & storm enrichment, evidence-backed opportunity signals, and client-ready lead feeds."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Lead Generation Automation" }]
+requires-python = ">=3.11"
+keywords = ["leads", "permits", "miami-dade", "roofing", "arcgis", "noaa", "sales-intelligence"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Sales/Marketing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "urllib3>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+]
+
+[project.scripts]
+# Full pipeline (ingest -> classify -> enrich -> signals -> feeds)
+permit-pipeline = "src.cli:main"
+# Signal engine (parcels, storms, graph, feeds, outcomes)
+lead-signals = "src.opportunity.cli:main"
+# Roofing intelligence (classification, audits, validation)
+roofing-intel = "src.roofing.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

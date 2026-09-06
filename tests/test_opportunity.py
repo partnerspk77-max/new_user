@@ -492,3 +492,38 @@ class TestParcelEnrichedOpportunityScoring:
         assert sig.storm_distance_miles is not None and sig.storm_distance_miles <= 1.0
         assert sig.evidence_breakdown["storm_evidence"] >= 15.0
         assert "Recent severe HAIL" in " ".join(sig.corroborating_signals)
+
+
+class TestAudienceFilterRegression:
+    """Regression: `--audience all` used to query target_audience='ALL' and return 0 rows."""
+
+    def _make_signal(self, audience: str) -> PropertySignal:
+        return PropertySignal(
+            signal_id="SIG-TEST-0001" if audience == "ROOFING_CONTRACTOR" else "SIG-TEST-0002",
+            folio="30-9999-000-0010",
+            address="1 TEST WAY",
+            signal_type="PROPERTY_RENOVATION_SIGNAL",
+            target_audience=audience,
+            evidence_score=80.0,
+        )
+
+    def test_audience_all_returns_all_signals(self, opp_db):
+        storage = OpportunityStorage(opp_db)
+        storage.save_signals([self._make_signal("ROOFING_CONTRACTOR"), self._make_signal("SUPPLIER_DISTRIBUTOR")])
+
+        assert len(storage.get_signals(audience="all")) == 2
+        assert len(storage.get_signals(audience="ALL")) == 2
+        assert len(storage.get_signals(audience=None)) == 2
+        assert len(storage.get_signals(audience="roofer")) == 1
+        assert len(storage.get_signals(audience="supplier")) == 1
+
+    def test_export_feeds_writes_headers_even_when_empty(self, opp_db, tmp_path):
+        storage = OpportunityStorage(opp_db)
+        csv_r = tmp_path / "roofers.csv"
+        csv_s = tmp_path / "suppliers.csv"
+        json_all = tmp_path / "all.json"
+        stats = storage.export_signals(csv_r, csv_s, json_all)
+
+        assert stats["total"] == 0
+        assert csv_r.exists() and csv_r.read_text().strip().startswith("signal_id")
+        assert csv_s.exists() and csv_s.read_text().strip().startswith("signal_id")

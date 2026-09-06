@@ -271,7 +271,17 @@ def main() -> int:
     p_audit.set_defaults(func=handle_audit_roofing)
 
     parsed_args = parser.parse_args()
-    return parsed_args.func(parsed_args)
+    try:
+        return parsed_args.func(parsed_args)
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Progress is checkpointed — re-run to resume.")
+        return 130
+    except Exception as exc:
+        from src.logger import logger
+        logger.error(f"Command '{parsed_args.subcommand}' failed: {exc}", exc_info=True)
+        print(f"\n[!] COMMAND FAILED: {exc}")
+        print(f"    Full traceback written to logs/. Fix the cause and re-run — commands are safe to retry.\n")
+        return 1
 
 
 if __name__ == "__main__":

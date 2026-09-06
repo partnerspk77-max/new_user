@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from src.client.parcel_client import ParcelClient
+from src.client.exceptions import WeatherFetchError
 from src.config import config
 from src.enrichment.storage import ParcelStorage
 from src.opportunity.engine import PropertyOpportunityEngine
@@ -137,7 +138,13 @@ def handle_enrich_weather(args: argparse.Namespace) -> int:
     client = NOAAStormClient()
     start_time = time.perf_counter()
 
-    events = client.fetch_local_storm_reports(start_date=start_date)
+    try:
+        events = client.fetch_local_storm_reports(start_date=start_date)
+    except WeatherFetchError as wfe:
+        print(f"\n[!] STORM ENRICHMENT FAILED — no weather data was ingested.")
+        print(f"    Reason: {wfe}")
+        print("    This is a network/API issue, not 'no storms today'. Re-run later; nothing was corrupted.\n")
+        return 1
     saved = storm_storage.upsert_storm_events(events)
     duration = round(time.perf_counter() - start_time, 2)
 
@@ -430,10 +437,21 @@ def handle_generate_interview_kit(args: argparse.Namespace) -> int:
 
 
 def handle_record_outcome(args: argparse.Namespace) -> int:
-    _, _, _, _, outcome_storage, _ = get_components()
+    _, storage, _, _, outcome_storage, _ = get_components()
     signal_id = args.signal_id
     contractor = args.contractor
     notes = args.notes or ""
+
+    # Guard against orphan telemetry: the signal must exist or stats get skewed forever.
+    known_signals = {s["signal_id"] for s in storage.get_signals(audience="all", status=SignalStatus.ACTIVE, limit=1_000_000)}
+    known_signals.update(
+        s["signal_id"] for s in storage.get_signals(audience="all", status=SignalStatus.RESOLVED, limit=1_000_000)
+    )
+    if signal_id not in known_signals:
+        print(f"\n[!] ERROR: Signal ID '{signal_id}' does not exist in the signal database.")
+        print("    Run 'python -m src.opportunity.cli list-signals' to see valid signal IDs.")
+        print("    Outcomes must reference a real signal to keep conversion metrics trustworthy.\n")
+        return 1
 
     reason = args.reason.strip().lower() if args.reason else None
     if reason and reason not in ALL_REASON_CODES:
@@ -526,7 +544,8 @@ def handle_export_feeds(args: argparse.Namespace) -> int:
 def handle_list_signals(args: argparse.Namespace) -> int:
     _, storage, _, _, _, _ = get_components()
     audience = args.audience
-    limit = args.limit or 15
+    # 0 = explicit "show all"; unset flag defaults to a compact top-15 view.
+    limit = args.limit if args.limit is not None else 15
 
     signals = storage.get_signals(audience=audience, limit=limit)
     if not signals:
@@ -668,13 +687,13 @@ def main() -> int:
     # list-signals
     p_list = subparsers.add_parser("list-signals", help="List active signals with evidence breakdowns")
     p_list.add_argument("--audience", choices=["roofer", "supplier", "all"], default=None, help="Target audience filter")
-    p_list.add_argument("--limit", type=int, default=20, help="Max records to show")
+    p_list.add_argument("--limit", type=int, default=None, help="Max records to show (default: 15; 0 = all)")
     p_list.set_defaults(func=handle_list_signals)
 
     # Aliases
     p_list_opp = subparsers.add_parser("list-opportunities", help="Alias for list-signals")
     p_list_opp.add_argument("--audience", choices=["roofer", "supplier", "all"], default=None)
-    p_list_opp.add_argument("--limit", type=int, default=20)
+    p_list_opp.add_argument("--limit", type=int, default=None)
     p_list_opp.set_defaults(func=handle_list_signals)
 
     # signal-stats
@@ -685,7 +704,17 @@ def main() -> int:
     p_opp_stats.set_defaults(func=handle_signal_stats)
 
     parsed_args = parser.parse_args()
-    return parsed_args.func(parsed_args)
+    try:
+        return parsed_args.func(parsed_args)
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Progress is checkpointed — re-run to resume.")
+        return 130
+    except Exception as exc:
+        from src.logger import logger
+        logger.error(f"Command '{parsed_args.subcommand}' failed: {exc}", exc_info=True)
+        print(f"\n[!] COMMAND FAILED: {exc}")
+        print(f"    Full traceback written to logs/. Fix the cause and re-run — commands are safe to retry.\n")
+        return 1
 
 
 if __name__ == "__main__":

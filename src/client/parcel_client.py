@@ -11,6 +11,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
+from src.client.exceptions import ParcelFetchError
 from src.enrichment.models import PropertyParcel
 from src.logger import logger
 
@@ -59,7 +60,7 @@ class ParcelClient:
         s = requests.Session()
         s.headers.update(
             {
-                "User-Agent": "MiamiDadePermitIntelligence/2.0 (+https://github.com/balmen)",
+                "User-Agent": "MiamiDadePermitIntelligence/2.0 (+https://github.com/partnerspk77-max/new_user)",
                 "Accept": "application/json",
             }
         )
@@ -67,6 +68,7 @@ class ParcelClient:
             total=5,
             backoff_factor=1.5,
             status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST"]),
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retries)
@@ -78,12 +80,23 @@ class ParcelClient:
         """
         Fetches parcel details for a batch of folios (up to batch_size).
         Normalizes folios by stripping hyphens and whitespace.
+
+        Raises ParcelFetchError on hard network/protocol failure so the caller can
+        decide whether to continue (batch-level resilience stays in fetch_all_parcels).
         """
         cleaned_folios = list({f.replace("-", "").strip() for f in folios if f and f.strip()})
         if not cleaned_folios:
             return []
 
-        formatted_list = ", ".join(f"'{f}'" for f in cleaned_folios)
+        # Folios are numeric strings; reject anything else to keep the IN() clause safe.
+        safe_folios = [f for f in cleaned_folios if f.isalnum()]
+        if len(safe_folios) != len(cleaned_folios):
+            dropped = set(cleaned_folios) - set(safe_folios)
+            logger.warning(f"Dropped {len(dropped)} malformed folio(s) from parcel query: {sorted(dropped)[:5]}...")
+        if not safe_folios:
+            return []
+
+        formatted_list = ", ".join(f"'{f}'" for f in safe_folios)
         where_clause = f"FOLIO IN ({formatted_list})"
 
         params = {
@@ -100,8 +113,7 @@ class ParcelClient:
 
             if "error" in data:
                 err_msg = data["error"].get("message", "Unknown ArcGIS error")
-                logger.error(f"ArcGIS PaGISView error for batch: {err_msg}")
-                return []
+                raise ParcelFetchError(f"ArcGIS PaGISView error for batch: {err_msg}")
 
             features = data.get("features", [])
             parcels: List[PropertyParcel] = []
@@ -112,9 +124,12 @@ class ParcelClient:
 
             return parcels
 
+        except ParcelFetchError:
+            raise
         except Exception as exc:
-            logger.error(f"Failed to fetch parcel batch of {len(cleaned_folios)} folios: {exc}")
-            return []
+            raise ParcelFetchError(
+                f"Failed to fetch parcel batch of {len(safe_folios)} folios: {exc}"
+            ) from exc
 
     def fetch_all_parcels(
         self,
@@ -123,17 +138,25 @@ class ParcelClient:
     ) -> List[PropertyParcel]:
         """
         Iterates over all requested folios in chunked batches with delay and error resilience.
+
+        A failed batch never aborts the whole run, but failures are tracked and loudly
+        reported so 'no parcels' can never be mistaken for 'API is fine'.
         """
         unique_folios = list({f.replace("-", "").strip() for f in folios if f and f.strip()})
         total = len(unique_folios)
         results: List[PropertyParcel] = []
+        failed_folios: List[str] = []
 
         logger.info(f"Starting parcel enrichment for {total} unique folios in chunks of {self.batch_size}...")
 
         for i in range(0, total, self.batch_size):
             chunk = unique_folios[i : i + self.batch_size]
-            parcels = self.fetch_parcels_batch(chunk)
-            results.extend(parcels)
+            try:
+                parcels = self.fetch_parcels_batch(chunk)
+                results.extend(parcels)
+            except ParcelFetchError as exc:
+                failed_folios.extend(chunk)
+                logger.error(f"Parcel batch failed and was skipped ({len(chunk)} folios): {exc}")
 
             if progress_callback:
                 progress_callback(len(results), total)
@@ -142,4 +165,9 @@ class ParcelClient:
                 time.sleep(self.request_delay)
 
         logger.info(f"Enrichment complete. Successfully retrieved {len(results)} of {total} parcels.")
+        if failed_folios:
+            logger.warning(
+                f"PARCEL ENRICHMENT INCOMPLETE: {len(failed_folios)}/{total} folios failed to fetch "
+                f"(network/API errors). Re-run 'enrich-parcels' later to retry these; results are cached."
+            )
         return results
