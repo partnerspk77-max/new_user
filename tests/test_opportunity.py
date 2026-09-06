@@ -241,7 +241,7 @@ class TestPropertyOpportunityEngine:
         assert SignalType.PROPERTY_RENOVATION_SIGNAL in sig_types
         reno_sig = next(s for s in signals if s.signal_type == SignalType.PROPERTY_RENOVATION_SIGNAL)
         assert reno_sig.target_audience == "ROOFING_CONTRACTOR"
-        assert "Last roof permit was" in " ".join(reno_sig.corroborating_signals)
+        assert "last recorded permit was" in " ".join(reno_sig.corroborating_signals)
         assert len(reno_sig.unverified_assumptions) >= 2
         assert reno_sig.evidence_breakdown["roof_history"] >= 20.0
 

@@ -382,22 +382,25 @@ class PropertyOpportunityEngine:
                         velocity_pts = 15.0
 
                     # 2. Roof Permit History (0-35)
+                    # CRITICAL: Missing evidence must NOT become positive evidence.
+                    # 0 roof permits in a 180-day window is expected for most properties,
+                    # not positive proof of an aging roof. Lifetime roof age requires Property Appraiser year_built.
                     if timeline.roof_permits_count == 0:
-                        roof_history_pts = 25.0  # Zero roof permits on record in dataset
-                        roof_note = "Zero roofing permits on record in county dataset"
+                        roof_history_pts = 0.0
+                        roof_note = "No roof permit found in current dataset observation window"
                     elif timeline.years_since_last_roof_permit is not None:
                         if timeline.years_since_last_roof_permit >= 15.0:
                             roof_history_pts = 35.0
-                            roof_note = f"Last roof permit was {timeline.years_since_last_roof_permit} years ago"
+                            roof_note = f"Verified older roof: last recorded permit was {timeline.years_since_last_roof_permit} years ago"
                         elif timeline.years_since_last_roof_permit >= 10.0:
                             roof_history_pts = 20.0
-                            roof_note = f"Last roof permit was {timeline.years_since_last_roof_permit} years ago"
+                            roof_note = f"Aging roof: last recorded permit was {timeline.years_since_last_roof_permit} years ago"
                         else:
-                            roof_history_pts = 5.0
-                            roof_note = f"Roof was permitted relatively recently ({timeline.years_since_last_roof_permit} yrs ago)"
+                            roof_history_pts = 0.0
+                            roof_note = f"Recent roof on record ({timeline.years_since_last_roof_permit} yrs ago); replacement unlikely needed"
                     else:
-                        roof_history_pts = 20.0
-                        roof_note = "Historical roof permit date unrecorded"
+                        roof_history_pts = 0.0
+                        roof_note = "Historical roof permit date unverified in current dataset"
 
                     # 3. Freshness of Renovation Activity (0-20)
                     if age_hours is not None and age_hours <= 72.0:
@@ -427,9 +430,9 @@ class PropertyOpportunityEngine:
                         f"Latest permit activity issued {int(age_days or 0)} days ago ({freshness})",
                     ]
                     unverified = [
-                        "Physical roof covering age and condition uninspected (requires on-site assessment)",
-                        "Building year-built and square footage unverified (pending Property Appraiser parcel integration)",
-                        "Owner may have replaced roof without permits or roof may still have remaining useful life",
+                        "Zero roof permits in dataset window does not confirm property has never had a roof replacement",
+                        "Physical roof covering age and condition uninspected (requires Property Appraiser year_built or on-site assessment)",
+                        "Owner may have replaced roof prior to dataset window or roof may still have remaining useful life",
                     ]
 
                     signals.append(
