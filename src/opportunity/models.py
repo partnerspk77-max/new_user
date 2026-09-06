@@ -45,9 +45,32 @@ class PropertyTimeline:
     first_permit_date: Optional[str] = None
     latest_permit_date: Optional[str] = None
     permits: List[Dict[str, Any]] = field(default_factory=list)
+    # Physical Parcel Attributes (from Property Appraiser PaGISView)
+    year_built: Optional[int] = None
+    building_actual_area: Optional[float] = None
+    building_heated_area: Optional[float] = None
+    dor_desc: Optional[str] = None
+    owner_name: Optional[str] = None
+    assessed_value: Optional[float] = None
+
+    @property
+    def building_age(self) -> Optional[int]:
+        if self.year_built is not None and 1800 <= self.year_built <= datetime.now(timezone.utc).year:
+            return datetime.now(timezone.utc).year - self.year_built
+        return None
+
+    @property
+    def estimated_roof_squares(self) -> Optional[float]:
+        area = self.building_actual_area or self.building_heated_area
+        if area and area > 0:
+            return round(area / 100.0, 1)
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["building_age"] = self.building_age
+        d["estimated_roof_squares"] = self.estimated_roof_squares
+        return d
 
 
 @dataclass
@@ -83,6 +106,14 @@ class PropertySignal:
     residential_commercial: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Physical Parcel Enrichment Attributes
+    year_built: Optional[int] = None
+    building_age: Optional[int] = None
+    building_actual_area: Optional[float] = None
+    estimated_roof_squares: Optional[float] = None
+    owner_name: Optional[str] = None
+    dor_desc: Optional[str] = None
+    assessed_value: Optional[float] = None
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

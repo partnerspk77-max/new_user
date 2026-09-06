@@ -1,7 +1,8 @@
 """
 Property Opportunity & Signal Engine for Miami-Dade County.
 Synthesizes multi-trade histories across all unique folios (8,362+ properties)
-into transparent, evidence-backed commercial signals.
+and integrates Property Appraiser (PaGISView) structural data into transparent,
+evidence-backed commercial signals.
 Adopts the Signal -> Evidence -> Opportunity -> Verified Lead mental model.
 """
 
@@ -13,6 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.enrichment.models import PropertyParcel
 from src.opportunity.models import (
     PropertySignal,
     PropertyTimeline,
@@ -23,7 +25,7 @@ from src.storage.database import Database
 
 
 class PropertyOpportunityEngine:
-    """Processes parcel permit histories into multi-trade timelines and stateful commercial signals."""
+    """Processes parcel permit histories and property appraiser attributes into stateful signals."""
 
     def __init__(self, db: Database, ref_dt: Optional[datetime] = None):
         self.db = db
@@ -104,11 +106,23 @@ class PropertyOpportunityEngine:
                 signals.append("SWIMMING_POOL")
         return signals
 
-    def build_property_timelines(self) -> Dict[str, PropertyTimeline]:
+    def build_property_timelines(
+        self,
+        parcels_map: Optional[Dict[str, PropertyParcel]] = None,
+    ) -> Dict[str, PropertyTimeline]:
         """
         Groups all permits in the database by Folio to build rich property histories,
-        deriving roof history, trade velocity, and modernization patterns.
+        deriving roof history, trade velocity, and joining Property Appraiser structural facts.
         """
+        # Load cached parcels if not provided
+        if parcels_map is None:
+            try:
+                from src.enrichment.storage import ParcelStorage
+                storage = ParcelStorage(self.db)
+                parcels_map = storage.get_all_parcels_map()
+            except Exception:
+                parcels_map = {}
+
         conn = self.db.get_connection()
         cursor = conn.cursor()
 
@@ -191,6 +205,21 @@ class PropertyOpportunityEngine:
                 except Exception:
                     years_since_roof = None
 
+            # Enrich with physical parcel attributes if present
+            clean_folio = folio.replace("-", "").strip()
+            parcel = parcels_map.get(clean_folio)
+
+            year_built = parcel.year_built if parcel else None
+            actual_area = parcel.building_actual_area if parcel else None
+            heated_area = parcel.building_heated_area if parcel else None
+            dor_desc = parcel.dor_desc if parcel else None
+            owner_name = parcel.owner_name if parcel else None
+            assessed_val = parcel.assessed_value if parcel else None
+
+            # If parcel provides site address and timeline address is missing, use it
+            if not primary_address and parcel and parcel.site_address:
+                primary_address = parcel.site_address
+
             timelines[folio] = PropertyTimeline(
                 folio=folio,
                 address=primary_address,
@@ -210,6 +239,12 @@ class PropertyOpportunityEngine:
                 first_permit_date=first_date,
                 latest_permit_date=latest_date,
                 permits=permits,
+                year_built=year_built,
+                building_actual_area=actual_area,
+                building_heated_area=heated_area,
+                dor_desc=dor_desc,
+                owner_name=owner_name,
+                assessed_value=assessed_val,
             )
 
         return timelines
@@ -226,11 +261,18 @@ class PropertyOpportunityEngine:
         timelines: Dict[str, PropertyTimeline],
     ) -> List[PropertySignal]:
         """
-        Generates evidence-backed property signals using an additive, transparent scoring rubric.
+        Generates evidence-backed property signals using an additive, transparent scoring rubric
+        corroborated by physical Property Appraiser structural characteristics.
         """
         signals: List[PropertySignal] = []
 
         for folio, timeline in timelines.items():
+            # Disqualify reference folios or unplatted utility tracts
+            if timeline.dor_desc and ("REFERENCE" in timeline.dor_desc.upper() or "VACANT" in timeline.dor_desc.upper()):
+                if timeline.roof_permits_count == 0 and not timeline.has_active_roof_permit:
+                    # Skip speculative renovation signals on vacant land
+                    continue
+
             # -------------------------------------------------------------
             # TRACK A: Permitted Projects (Suppliers & Canvassers)
             # Objective fact: a roofing permit exists and is active
@@ -260,6 +302,11 @@ class PropertyOpportunityEngine:
                         f"Contractor on record: {cname if contractor_present else 'Unassigned / Owner-Builder'}",
                         f"Issued {int(age_hours or 0)} hours ago ({freshness})",
                     ]
+                    if timeline.building_actual_area:
+                        corroborating.append(f"Building footprint: {int(timeline.building_actual_area):,} sq ft (~{timeline.estimated_roof_squares} roofing squares)")
+                    if timeline.owner_name:
+                        corroborating.append(f"Property owner: {timeline.owner_name}")
+
                     unverified = [
                         "Job progress and tear-off schedule uninspected on site",
                         "Material supplier preference of contractor not yet confirmed",
@@ -294,6 +341,13 @@ class PropertyOpportunityEngine:
                             residential_commercial=timeline.residential_commercial,
                             latitude=p.get("latitude"),
                             longitude=p.get("longitude"),
+                            year_built=timeline.year_built,
+                            building_age=timeline.building_age,
+                            building_actual_area=timeline.building_actual_area,
+                            estimated_roof_squares=timeline.estimated_roof_squares,
+                            owner_name=timeline.owner_name,
+                            dor_desc=timeline.dor_desc,
+                            assessed_value=timeline.assessed_value,
                         )
                     )
 
@@ -327,6 +381,11 @@ class PropertyOpportunityEngine:
                         "Homeowner pulled official roofing permit with NO licensed roofing contractor assigned",
                         f"Permit status Active, issued {int(age_hours or 0)} hours ago ({freshness})",
                     ]
+                    if timeline.owner_name:
+                        corroborating.append(f"Recorded owner: {timeline.owner_name}")
+                    if timeline.building_actual_area:
+                        corroborating.append(f"Building area: {int(timeline.building_actual_area):,} sq ft (~{timeline.estimated_roof_squares} squares)")
+
                     unverified = [
                         "Owner may intend to self-perform labor under Florida owner-builder exemption statute 489.103(7)",
                         "Owner may have private unrecorded handshake agreement with an uncertified installer",
@@ -355,6 +414,13 @@ class PropertyOpportunityEngine:
                             residential_commercial=timeline.residential_commercial,
                             latitude=p.get("latitude"),
                             longitude=p.get("longitude"),
+                            year_built=timeline.year_built,
+                            building_age=timeline.building_age,
+                            building_actual_area=timeline.building_actual_area,
+                            estimated_roof_squares=timeline.estimated_roof_squares,
+                            owner_name=timeline.owner_name,
+                            dor_desc=timeline.dor_desc,
+                            assessed_value=timeline.assessed_value,
                         )
                     )
 
@@ -381,14 +447,9 @@ class PropertyOpportunityEngine:
                     else:
                         velocity_pts = 15.0
 
-                    # 2. Roof Permit History (0-35)
-                    # CRITICAL: Missing evidence must NOT become positive evidence.
-                    # 0 roof permits in a 180-day window is expected for most properties,
-                    # not positive proof of an aging roof. Lifetime roof age requires Property Appraiser year_built.
-                    if timeline.roof_permits_count == 0:
-                        roof_history_pts = 0.0
-                        roof_note = "No roof permit found in current dataset observation window"
-                    elif timeline.years_since_last_roof_permit is not None:
+                    # 2. Roof History & Physical Structure Age (0-35)
+                    # Corroborated with Property Appraiser physical year_built!
+                    if timeline.years_since_last_roof_permit is not None:
                         if timeline.years_since_last_roof_permit >= 15.0:
                             roof_history_pts = 35.0
                             roof_note = f"Verified older roof: last recorded permit was {timeline.years_since_last_roof_permit} years ago"
@@ -398,9 +459,22 @@ class PropertyOpportunityEngine:
                         else:
                             roof_history_pts = 0.0
                             roof_note = f"Recent roof on record ({timeline.years_since_last_roof_permit} yrs ago); replacement unlikely needed"
+                    elif timeline.building_age is not None:
+                        if timeline.building_age >= 25:
+                            roof_history_pts = 30.0
+                            roof_note = f"Structure built in {timeline.year_built} ({timeline.building_age} yrs old); roof exceeds typical 20-yr Florida lifespan with no recorded reroof"
+                        elif timeline.building_age >= 15:
+                            roof_history_pts = 20.0
+                            roof_note = f"Structure built in {timeline.year_built} ({timeline.building_age} yrs old); roof in second decade of service"
+                        elif timeline.building_age >= 10:
+                            roof_history_pts = 10.0
+                            roof_note = f"Structure built in {timeline.year_built} ({timeline.building_age} yrs old); roof approaching replacement window"
+                        else:
+                            roof_history_pts = 0.0
+                            roof_note = f"Recent construction: built in {timeline.year_built} ({timeline.building_age} yrs old); roof within typical service warranty"
                     else:
                         roof_history_pts = 0.0
-                        roof_note = "Historical roof permit date unverified in current dataset"
+                        roof_note = "No roof permit found in current dataset observation window"
 
                     # 3. Freshness of Renovation Activity (0-20)
                     if age_hours is not None and age_hours <= 72.0:
@@ -412,8 +486,15 @@ class PropertyOpportunityEngine:
                     else:
                         freshness_pts = 2.0
 
-                    # 4. Property Scale (0-10)
-                    scale_pts = 10.0 if timeline.residential_commercial == "RESIDENTIAL" else 5.0
+                    # 4. Property Scale & Valuation (0-10)
+                    if timeline.building_actual_area and timeline.building_actual_area >= 5000:
+                        scale_pts = 10.0
+                    elif timeline.building_actual_area and timeline.building_actual_area >= 2000:
+                        scale_pts = 7.0
+                    elif timeline.residential_commercial == "RESIDENTIAL":
+                        scale_pts = 5.0
+                    else:
+                        scale_pts = 3.0
 
                     score_breakdown = {
                         "renovation_velocity": velocity_pts,
@@ -429,11 +510,22 @@ class PropertyOpportunityEngine:
                         roof_note,
                         f"Latest permit activity issued {int(age_days or 0)} days ago ({freshness})",
                     ]
-                    unverified = [
-                        "Zero roof permits in dataset window does not confirm property has never had a roof replacement",
-                        "Physical roof covering age and condition uninspected (requires Property Appraiser year_built or on-site assessment)",
-                        "Owner may have replaced roof prior to dataset window or roof may still have remaining useful life",
-                    ]
+                    if timeline.building_actual_area:
+                        corroborating.append(f"Building area: {int(timeline.building_actual_area):,} sq ft (~{timeline.estimated_roof_squares} squares)")
+                    if timeline.owner_name:
+                        corroborating.append(f"Recorded owner: {timeline.owner_name}")
+
+                    if timeline.building_age is not None and timeline.building_age >= 10:
+                        unverified = [
+                            "Physical roof covering uninspected on-site; age inferred from Property Appraiser construction record",
+                            "Owner may have replaced roof prior to dataset window without pulling permits or using unpermitted labor",
+                        ]
+                    else:
+                        unverified = [
+                            "Zero roof permits in dataset window does not confirm property has never had a roof replacement",
+                            "Physical roof covering age and condition uninspected (requires Property Appraiser year_built or on-site assessment)",
+                            "Owner may have replaced roof prior to dataset window or roof may still have remaining useful life",
+                        ]
 
                     signals.append(
                         PropertySignal(
@@ -458,6 +550,13 @@ class PropertyOpportunityEngine:
                             residential_commercial=timeline.residential_commercial,
                             latitude=latest_p.get("latitude"),
                             longitude=latest_p.get("longitude"),
+                            year_built=timeline.year_built,
+                            building_age=timeline.building_age,
+                            building_actual_area=timeline.building_actual_area,
+                            estimated_roof_squares=timeline.estimated_roof_squares,
+                            owner_name=timeline.owner_name,
+                            dor_desc=timeline.dor_desc,
+                            assessed_value=timeline.assessed_value,
                         )
                     )
 
@@ -479,13 +578,21 @@ class PropertyOpportunityEngine:
                     "no_roof_permit_on_record": 25.0,
                     "freshness_bonus": 15.0 if (age_hours is not None and age_hours <= 168.0) else 5.0,
                 }
-                total_score = round(sum(score_breakdown.values()), 1)
+                if timeline.building_age is not None and timeline.building_age >= 20:
+                    score_breakdown["aging_structure_bonus"] = 10.0
+
+                total_score = round(min(100.0, sum(score_breakdown.values())), 1)
 
                 corroborating = [
                     "Active rooftop solar PV permit filed on property",
                     "No roof permit recorded in county dataset",
                     f"Filing freshness: {freshness}",
                 ]
+                if timeline.building_age is not None:
+                    corroborating.append(f"Structure built in {timeline.year_built} ({timeline.building_age} yrs old)")
+                if timeline.owner_name:
+                    corroborating.append(f"Recorded owner: {timeline.owner_name}")
+
                 unverified = [
                     "Existing roof may already be structurally sound or newer than dataset window",
                     "Specific utility/jurisdiction reroof requirement unverified for this installation",
@@ -514,6 +621,13 @@ class PropertyOpportunityEngine:
                         residential_commercial=timeline.residential_commercial,
                         latitude=solar_permit.get("latitude"),
                         longitude=solar_permit.get("longitude"),
+                        year_built=timeline.year_built,
+                        building_age=timeline.building_age,
+                        building_actual_area=timeline.building_actual_area,
+                        estimated_roof_squares=timeline.estimated_roof_squares,
+                        owner_name=timeline.owner_name,
+                        dor_desc=timeline.dor_desc,
+                        assessed_value=timeline.assessed_value,
                     )
                 )
 

@@ -306,3 +306,90 @@ class TestOpportunityStorageAndCLI:
 
         with patch("sys.argv", ["cli.py", "list-opportunities", "--limit", "5"]):
             assert main() == 0
+
+
+class TestParcelEnrichedOpportunityScoring:
+    def test_building_age_and_scale_calibration(self, opp_db, sample_permits_dataset):
+        populate_test_db(opp_db, sample_permits_dataset)
+        engine = PropertyOpportunityEngine(opp_db)
+
+        # Scenario 1: Older building (1955, age 71) with active AC permit and NO roof permit
+        from src.enrichment.models import PropertyParcel
+        older_parcel = PropertyParcel(
+            folio="30-1001-000-0030",
+            year_built=1955,
+            building_actual_area=6200.0,
+            owner_name="ESTATE HOLDINGS LLC",
+            dor_desc="SINGLE FAMILY RESIDENTIAL",
+            assessed_value=1500000.0,
+        )
+
+        timelines = engine.build_property_timelines(parcels_map={"3010010000030": older_parcel})
+        t3 = timelines["30-1001-000-0030"]
+        assert t3.year_built == 1955
+        assert t3.building_age is not None and t3.building_age >= 70
+        assert t3.estimated_roof_squares == 62.0
+        assert t3.owner_name == "ESTATE HOLDINGS LLC"
+
+        signals = engine.generate_signals(timelines)
+        reno_sig = next(s for s in signals if s.folio == "30-1001-000-0030" and s.signal_type == SignalType.PROPERTY_RENOVATION_SIGNAL)
+
+        # Folio 03 has a recorded roof permit from 12 years ago in sample data:
+        # years_since_last_roof_permit = 12.0 -> 20.0 pts.
+        # Plus scale points >= 5000 sq ft -> 10.0 pts.
+        assert reno_sig.evidence_breakdown["property_scale"] == 10.0
+        assert reno_sig.year_built == 1955
+        assert reno_sig.owner_name == "ESTATE HOLDINGS LLC"
+
+    def test_new_construction_vs_vintage_structure_scoring(self, opp_db):
+        engine = PropertyOpportunityEngine(opp_db)
+        from src.enrichment.models import PropertyParcel
+
+        # Case A: Vintage home built 1960 (no roof permit on record)
+        vintage_timeline = PropertyTimeline(
+            folio="FOLIO-VINTAGE",
+            address="100 OLD RD",
+            total_permits=1,
+            trades=["MECH"],
+            active_trades=["MECH"],
+            roof_permits_count=0,
+            has_active_roof_permit=False,
+            has_active_non_roof_permit=True,
+            non_roof_renovation_types=["HVAC_AC_REPLACEMENT"],
+            year_built=1960,
+            building_actual_area=2400.0,
+            permits=[{"permit_number": "M1", "permit_type": "MECH", "status": "A", "issued_at": "2026-09-01T00:00:00Z"}]
+        )
+
+        # Case B: Brand new construction built 2024 (no roof permit on record)
+        new_timeline = PropertyTimeline(
+            folio="FOLIO-NEW",
+            address="200 NEW WAY",
+            total_permits=1,
+            trades=["MECH"],
+            active_trades=["MECH"],
+            roof_permits_count=0,
+            has_active_roof_permit=False,
+            has_active_non_roof_permit=True,
+            non_roof_renovation_types=["HVAC_AC_REPLACEMENT"],
+            year_built=2024,
+            building_actual_area=2400.0,
+            permits=[{"permit_number": "M2", "permit_type": "MECH", "status": "A", "issued_at": "2026-09-01T00:00:00Z"}]
+        )
+
+        timelines = {"FOLIO-VINTAGE": vintage_timeline, "FOLIO-NEW": new_timeline}
+        signals = engine.generate_signals(timelines)
+
+        vintage_sig = next(s for s in signals if s.folio == "FOLIO-VINTAGE")
+        new_sig = next(s for s in signals if s.folio == "FOLIO-NEW")
+
+        # Vintage structure built in 1960 (66 yrs old) must receive 30 points for aging structure
+        assert vintage_sig.evidence_breakdown["roof_history"] == 30.0
+        assert "Structure built in 1960" in " ".join(vintage_sig.corroborating_signals)
+
+        # New construction built in 2024 (2 yrs old) must receive 0 points (disqualified)
+        assert new_sig.evidence_breakdown["roof_history"] == 0.0
+        assert "Recent construction" in " ".join(new_sig.corroborating_signals)
+
+        # Vintage score must be significantly higher than new construction score
+        assert vintage_sig.evidence_score > new_sig.evidence_score
