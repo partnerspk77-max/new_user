@@ -1,0 +1,7 @@
+# local run leftovers
+audit-log/
+audit/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
