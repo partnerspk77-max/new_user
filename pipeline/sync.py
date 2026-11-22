@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = "archive-relay/v1"
-USER_AGENT = "archive-relay/1.0"
+USER_AGENT = "USA-Live-Trains/1.0 (+https://usa.metro-status.com)"
 TABLE_EXTENSIONS = {".txt", ".csv"}
 GET_ATTEMPTS = 4
 POST_ATTEMPTS = 5
